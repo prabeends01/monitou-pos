@@ -1,0 +1,51 @@
+# Single .gitignore for the whole monitou-pos tree — covers backend
+# (Python/uv), client (Node/Vite), and client/src-tauri (Rust/Tauri).
+# Patterns without a leading "/" match at any depth, so this one file
+# reaches into every nested directory.
+
+# Python (backend)
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Node (client)
+node_modules/
+dist/
+dist-ssr/
+*.local
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Rust / Tauri (client/src-tauri)
+target/
+**/gen/schemas/
+
+# Build output (generic)
+build/
+
+# Env, local data
+.env
+*.db
+
+# Editor / OS cruft
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

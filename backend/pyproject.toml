@@ -1,0 +1,33 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "G Prabeen Kumar", email = "g.prabeenkumar@outlook.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.19.1",
+    "apscheduler>=3.11.3",
+    "bcrypt<4.1",
+    "fastapi>=0.141.1",
+    "passlib[bcrypt]>=1.7.4",
+    "psycopg[binary]>=3.3.4",
+    "pydantic-settings>=2.15.0",
+    "python-escpos>=3.1",
+    "python-jose[cryptography]>=3.5.0",
+    "python-multipart>=0.0.32",
+    "sqlmodel>=0.0.39",
+    "uvicorn[standard]>=0.52.3",
+    "weasyprint>=69.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.3",
+]
