@@ -18,6 +18,7 @@ class PurchaseOrder(SQLModel, table=True):
     __tablename__ = "purchase_orders"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    tenant_id: uuid.UUID = Field(foreign_key="tenants.id", index=True)
     supplier_id: uuid.UUID = Field(foreign_key="suppliers.id", index=True)
     status: PurchaseOrderStatus = Field(default=PurchaseOrderStatus.draft)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -27,6 +28,7 @@ class PurchaseOrderItem(SQLModel, table=True):
     __tablename__ = "purchase_order_items"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    tenant_id: uuid.UUID = Field(foreign_key="tenants.id", index=True)
     purchase_order_id: uuid.UUID = Field(foreign_key="purchase_orders.id", index=True)
     product_id: uuid.UUID = Field(foreign_key="products.id", index=True)
     qty_base_units: int

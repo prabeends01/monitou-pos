@@ -8,8 +8,10 @@ from app.db import get_session
 from app.models.sale import Sale, SaleItem
 from app.models.user import User, UserRole
 from app.schemas.sale import SaleCreate, SaleRead
+from app.services.entitlements import require_feature
 from app.services.invoicing import render_invoice_pdf
 from app.services.sales import create_sale
+from app.tenancy import get_tenant_owned, tenant_scoped
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 
@@ -26,8 +28,9 @@ async def post_sale(
     payload: SaleCreate,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
+    _feature: None = Depends(require_feature("BASIC_SALES_ORDER")),
 ) -> SaleRead:
-    sale = create_sale(session, payload, cashier_id=user.id)
+    sale = create_sale(session, payload, tenant_id=user.tenant_id, cashier_id=user.id)
     return _to_read(session, sale)
 
 
@@ -36,8 +39,9 @@ async def get_sale(
     sale_id: uuid.UUID,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
+    _feature: None = Depends(require_feature("BASIC_SALES_ORDER")),
 ) -> SaleRead:
-    sale = session.get(Sale, sale_id)
+    sale = get_tenant_owned(session, Sale, sale_id, user.tenant_id)
     if sale is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="sale not found")
     if user.role != UserRole.admin and sale.cashier_id != user.id:
@@ -49,8 +53,9 @@ async def get_sale(
 async def list_sales(
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
+    _feature: None = Depends(require_feature("BASIC_SALES_ORDER")),
 ) -> list[SaleRead]:
-    query = select(Sale)
+    query = tenant_scoped(Sale, user.tenant_id)
     if user.role != UserRole.admin:
         query = query.where(Sale.cashier_id == user.id)
     sales = session.exec(query).all()
@@ -62,8 +67,9 @@ async def get_sale_invoice(
     sale_id: uuid.UUID,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
+    _feature: None = Depends(require_feature("BASIC_SALES_ORDER")),
 ) -> Response:
-    sale = session.get(Sale, sale_id)
+    sale = get_tenant_owned(session, Sale, sale_id, user.tenant_id)
     if sale is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="sale not found")
     if user.role != UserRole.admin and sale.cashier_id != user.id:

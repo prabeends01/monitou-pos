@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.jobs.low_stock_alerts import start_scheduler
-from app.routers import auth, barcodes, products, reports, sales, stock, users
+from app.routers import auth, barcodes, platform_admin, products, reports, sales, stock, tenant, users
 
 
 @asynccontextmanager
@@ -22,6 +22,8 @@ app.include_router(barcodes.router)
 app.include_router(stock.router)
 app.include_router(sales.router)
 app.include_router(reports.router)
+app.include_router(tenant.router)
+app.include_router(platform_admin.router)
 
 
 @app.get("/health")

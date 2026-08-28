@@ -28,11 +28,22 @@ export function AppServicesProvider({ children }: { children: ReactNode }) {
     };
     let cancelled = false;
 
-    restoreSession(api).then((session) => {
-      if (cancelled) return;
-      setServices({ api });
-      if (session) loggedIn(session.role, session.username);
-    });
+    restoreSession(api)
+      .catch((err) => {
+        // plugin-store's Tauri IPC is only present inside the real Tauri
+        // webview — e.g. running this in a plain browser tab for UI
+        // debugging, or a corrupted/missing store file, would otherwise
+        // throw here and leave the app permanently on a blank screen with
+        // `services` never set. Fail back to "no persisted session"
+        // instead — the cashier just sees the login screen.
+        console.error("restoreSession failed, continuing without a persisted session", err);
+        return null;
+      })
+      .then((session) => {
+        if (cancelled) return;
+        setServices({ api });
+        if (session) loggedIn(session.role, session.username);
+      });
 
     return () => {
       cancelled = true;
