@@ -591,3 +591,335 @@ A phase is not complete until: migrations run cleanly from scratch, all new
 endpoints have passing tests including a role-permission test, and the
 relevant section of this file is updated if the implementation diverged from
 the plan above.
+
+---
+
+## 11. Multi-tenant SaaS: Plan, Feature Entitlement & Usage Limit system
+
+This section is the architecture and migration plan for turning this
+single-shop app into one multi-tenant application serving BASIC / ESSENTIAL /
+ENTERPRISE customers from the same codebase. **One application, one
+codebase, data-driven plan config** — never `if plan == "X"` scattered
+through routers/components. Follow the stage order below the same way
+Section 8 is followed: don't start a stage until the previous one is
+migrated and tested.
+
+### 11.1 Reality check against the current codebase (read before assuming a module exists)
+
+This app today is a **single shop, single location, two-role** POS + basic
+inventory system. It is not yet the ERP the full feature catalog (11.5)
+describes. Concretely:
+
+- **No tenant concept anywhere.** `users`, `products`, `sales`, etc. are one
+  global set of rows. This is the biggest structural gap — see 11.2.
+- **No warehouses/branches at all.** There's one implicit location. The
+  `WAREHOUSE_MANAGEMENT` / `STORAGE_LOCATION` / `INTER_WAREHOUSE_TRANSFER` /
+  branch-limit features have **no backing module yet** — they need to be
+  built, not just gated.
+- **Purchasing is minimal.** `suppliers` + `purchase_orders` exist
+  (draft/ordered/partially_received/received/cancelled status enum) but
+  there is no Purchase Request, no PO approval workflow, no GRN entity, no
+  vendor returns. `GRN`/`PARTIAL_GRN`/`PURCHASE_REQUEST*` features have no
+  backing module yet.
+- **Sales is POS-only.** `sales`/`sale_items` cover a walk-in-style
+  checkout. No quotations, no reservations, no pick lists, no dispatch/
+  transport tracking, no customer returns. Most of the `sales` module's
+  feature catalog has no backing module yet.
+- **No barcode *generation/printing/scanning workflow*.** `barcodes` today
+  is just "a barcode value maps to a product + pack_qty," looked up by
+  `GET /barcodes/search`. There's no label generation, no dedicated
+  scan-driven GRN/picking flow, no wrong-part validation.
+- **No cycle counting, quarantine stock, ageing/dead-stock analytics.**
+  `PHYSICAL_STOCK_VERIFICATION`/`STOCK_VARIANCE`/`DAMAGED_STOCK` have a thin
+  analogue (stock adjustments + the negative-balance flag) but no dedicated
+  variance/approval workflow.
+- **RBAC is binary** (`admin`/`sales` enum), not `CUSTOM_ROLES`/
+  `GRANULAR_PERMISSIONS`. There's no permission table.
+- **What already exists and maps cleanly:** `PRODUCT_MASTER`, `HSN_GST`
+  (schema supports it, not surfaced), `MINIMUM_STOCK`/`REORDER_LEVEL`/
+  `LOW_STOCK_ALERT`/`OUT_OF_STOCK_ALERT`, `STOCK_LEDGER`, `STOCK_ADJUSTMENT`,
+  `VENDOR_MASTER`/`VENDOR_PURCHASE_HISTORY`, `PURCHASE_ORDER` (basic, no
+  approval), `CUSTOMER_MASTER`, `BASIC_SALES_ORDER` (as POS checkout),
+  `STOCK_AVAILABILITY`, `BASIC_DASHBOARD`/`BASIC_REPORTS`.
+
+**Implication:** Stages 1–6 (schema, tenancy, entitlement service, limit
+service, backend guards, frontend gate) are buildable now and are
+plan-catalog-agnostic infrastructure — they don't need the missing modules
+to exist. Stages that gate a *specific* feature (e.g.
+`require_feature("INTER_WAREHOUSE_TRANSFER")`) can only be wired onto a
+router once that router exists. Where a catalog feature has no backing
+module yet, the feature row is still seeded (so the Plan page and upgrade
+comparison screen are accurate/sellable today) but nothing in the app calls
+`require_feature()` for it until that module is built as separate,
+explicitly-scoped work.
+
+### 11.2 Tenant isolation strategy
+
+- Add `tenant_id: uuid.UUID` (FK → `tenants.id`, indexed, **not nullable**
+  after backfill) to every existing business table: `users`, `products`,
+  `barcodes`, `stock_movements`, `suppliers`, `purchase_orders`,
+  `purchase_order_items`, `sales`, `sale_items`, `customers`. Backfill
+  strategy for the existing single dataset: create one `Tenant` row (e.g.
+  `tenant_code="MONITOU-001"`) and set it as every existing row's
+  `tenant_id` in the same migration, then add the `NOT NULL` constraint.
+- JWT gains a `tenant_id` claim, set at login from the authenticating user's
+  `tenant_id`. `get_current_user` already decodes the token — extend it to
+  also resolve and attach the tenant (and reject if the tenant is
+  suspended, deferring to 11.8's grace-period policy).
+- **Central scoping, not per-router filtering.** Add a `get_current_tenant`
+  dependency and a small query helper — e.g. `tenant_scoped(session,
+  tenant_id, Model)` returning a `select(Model).where(Model.tenant_id ==
+  tenant_id)` — and require every router to build queries through it.
+  A code-review checklist item (11.10) covers catching a missed filter.
+- **Defense in depth: Postgres Row-Level Security.** Because "every backend
+  query must automatically scope to the tenant, even against a
+  manually-modified request" is a hard requirement, don't rely solely on
+  every developer remembering the `.where()` clause. Enable RLS on every
+  tenant-scoped table with a policy keyed on `current_setting('app.tenant_id')`,
+  and have `get_session` (or a wrapping dependency) execute `SET
+  app.tenant_id = '<uuid>'` at the start of each request's transaction. A
+  forgotten application-level filter then still can't leak cross-tenant
+  rows — the database itself refuses. This is the single most important
+  mitigation for 11.9's top risk.
+- Cross-tenant test (see 11.11): authenticate as a Tenant A user, request a
+  Tenant B record's ID directly (path param or body), assert 404 (not 403 —
+  don't reveal the record exists).
+
+### 11.3 Backend entitlement service
+
+`app/services/entitlements.py`:
+
+```python
+def can_use_feature(session, tenant_id: uuid.UUID, feature_code: str) -> bool:
+    # 1. TenantFeatureOverride for (tenant_id, feature_code) — if a row
+    #    exists, its `enabled` wins outright (grants or revokes).
+    # 2. Else PlanFeature for the tenant's active_plan_id — `enabled` there.
+    # 3. Else False (unknown feature code fails closed).
+
+def require_feature(feature_code: str):
+    # FastAPI dependency factory. Depends(get_current_tenant) internally.
+    # 403 with the structured FEATURE_NOT_AVAILABLE body (11.6) if
+    # can_use_feature() is False.
+```
+
+`required_plan` in the 403 body is computed by finding the cheapest plan
+(by `setup_price`) whose `PlanFeature` enables that code — data-driven, not
+a hard-coded lookup table.
+
+### 11.4 Backend usage limit service
+
+`app/services/usage_limits.py`:
+
+```python
+def check_limit(session, tenant_id, limit_code: str, increment: int = 1) -> None:
+    # resolve limit = TenantLimitOverride else PlanLimit for active plan
+    # read UsageCounter.current_value for (tenant_id, limit_code)
+    # if current_value + increment > limit: raise PlanLimitReached(...)
+    #   -> structured 409 PLAN_LIMIT_REACHED (11.6)
+
+def increment_usage(session, tenant_id, limit_code: str, by: int = 1) -> None: ...
+def decrement_usage(session, tenant_id, limit_code: str, by: int = 1) -> None: ...
+```
+
+Call `check_limit` **before** the create commits, and `increment_usage` /
+`decrement_usage` in the same service function that creates/deactivates the
+counted entity (user activation/deactivation, warehouse creation, product
+creation) — one write path per metric, never a scattered `COUNT(*)`.
+Metric codes for this build: `MAX_USERS`, `MAX_BRANCHES`, `MAX_WAREHOUSES`,
+`MAX_SKUS`.
+
+### 11.5 Feature catalog, plan mapping, limits
+
+Centralized in `backend/app/plan_catalog.py` (already implemented — 11.12)
+and nowhere else. 80 feature codes across 9 modules
+(`inventory_catalog`, `warehouse`, `purchase`, `sales`, `barcode`,
+`stock_analytics`, `dashboard`, `reports`, `admin`); BASIC = 28 features,
+ESSENTIAL = BASIC + 34, ENTERPRISE = all 80. Limits: `MAX_USERS`/
+`MAX_BRANCHES`/`MAX_WAREHOUSES`/`MAX_SKUS` per the table in the original
+spec (5/1/1/5000, 15/2/2/15000, 30/5/5/50000). Backup retention
+(7/15/30 days) is informational metadata for the Plan page, enforced by the
+backup job/infra rather than `check_limit`.
+
+Note: "Basic RBAC" and "Basic Audit Log" (mentioned in the spec's BASIC
+feature list) have no dedicated feature codes — the base two-role split and
+a plain audit trail are core, ungated behavior; `CUSTOM_ROLES`/
+`GRANULAR_PERMISSIONS`/`FULL_AUDIT_LOG`/`ADVANCED_AUDIT_LOG` are the gated
+upgrades on top of that baseline.
+
+### 11.6 Backend feature guard — structured error contract
+
+```python
+@router.post("/warehouse-transfers")
+async def create_transfer(
+    ...,
+    _: None = Depends(require_feature("INTER_WAREHOUSE_TRANSFER")),
+    _perm: User = Depends(require_permission("CREATE_TRANSFER")),  # RBAC, separate layer — 11.9
+):
+```
+
+403 body on a feature gate failure:
+```json
+{
+  "code": "FEATURE_NOT_AVAILABLE",
+  "feature": "BARCODE_GENERATION",
+  "required_plan": "ESSENTIAL",
+  "message": "Barcode Generation is available in Essential and Enterprise plans."
+}
+```
+
+409 body on a limit gate failure:
+```json
+{
+  "code": "PLAN_LIMIT_REACHED",
+  "limit": "MAX_USERS",
+  "limit_value": 5,
+  "current_value": 5,
+  "message": "Your Basic plan supports up to 5 active users. Upgrade your plan or purchase additional user capacity."
+}
+```
+
+Both are raised as `HTTPException`-derived exceptions with a shared FastAPI
+exception handler so every router gets the same JSON shape without
+duplicating it.
+
+### 11.7 Frontend FeatureGate architecture
+
+- `GET /tenant/me/entitlements` (new endpoint) returns, for the
+  authenticated user's tenant: `{ plan_code, subscription_status,
+  features: { <code>: bool }, limits: { <code>: { used, max } } }`.
+  Fetched once via React Query on login, cached, invalidated on
+  plan/override changes (platform admin action or explicit refresh).
+- `useFeature(code: string): boolean` — reads that cached snapshot; no
+  component computes plan logic itself.
+- `<FeatureGate feature="BARCODE_GENERATION" mode="hide" | "lock" |
+  "disable">` — `hide` renders nothing (sidebar items), `lock` renders the
+  locked-feature card (icon, required plan, one-line explanation, Upgrade
+  CTA), `disable` clones its child as a disabled control with a tooltip
+  ("Inter-Warehouse Transfer requires Enterprise."). Default `mode="lock"`.
+- Never trusted for security — every gated action still hits a
+  `require_feature`-guarded endpoint; the frontend gate is UX only.
+
+### 11.8 Subscription status & grace period
+
+`SubscriptionStatus`: `ACTIVE | EXPIRING | EXPIRED | SUSPENDED |
+GRACE_PERIOD`. A scheduled job (alongside the existing
+`jobs/low_stock_alerts.py` pattern) transitions `ACTIVE → EXPIRING` inside a
+configurable window before `renewal_date`, and `EXPIRING → EXPIRED` after
+it; `EXPIRED → GRACE_PERIOD` is automatic with a configurable grace-period
+length (platform-admin-configurable, not hard-coded), and only
+`GRACE_PERIOD → SUSPENDED` needs an explicit platform-admin action or a
+final automatic cutoff — access is never destroyed the instant a date
+passes. `get_current_tenant` reads this status and attaches it to the
+request context so the frontend can show a persistent banner during
+`EXPIRING`/`GRACE_PERIOD`/`EXPIRED` without blocking every route itself
+(only `SUSPENDED` blocks non-billing routes).
+
+### 11.9 Multi-tenant security risks identified
+
+1. **Missed `tenant_id` filter in a hand-written query** — the single
+   biggest risk of converting an existing single-tenant codebase; mitigated
+   by RLS (11.2), not just code review.
+2. **IDOR via path/body IDs** — e.g. `GET /products/{id}` today does
+   `session.get(Product, product_id)` with no ownership check at all. Every
+   such lookup must add `.where(tenant_id == ...)` or rely on RLS to make
+   the row invisible regardless.
+3. **JWT tenant_id spoofing** — the claim must be server-derived at login
+   and signed, never accepted from a request body/header.
+4. **Cross-tenant enumeration via unique constraints** — `products.sku`,
+   `users.username`, `barcodes.barcode_value` are currently globally unique;
+   they must become unique **per tenant** (`UNIQUE(tenant_id, sku)`, etc.),
+   or Tenant A can learn whether Tenant B has a given SKU/username from a
+   409 conflict response.
+5. **Background jobs** (`low_stock_alerts.py`) currently query with no
+   tenant scoping at all — must be rewritten to iterate tenants and scope
+   each pass, not to become one cross-tenant pass with tenant info attached
+   after the fact.
+6. **Platform Admin privilege boundary** — Platform Admin auth must be a
+   fully separate credential/role space from tenant users (11.13), never
+   "an admin user with an extra flag" in the same `users` table, so a
+   tenant-side privilege escalation bug can't reach platform-admin actions.
+
+### 11.9a Operational note: RLS needs a non-superuser DB app role
+
+Postgres superusers bypass Row-Level Security **unconditionally**, `FORCE
+ROW LEVEL SECURITY` included — this is not configurable. The local
+`docker-compose` Postgres's default user is a superuser, so RLS is silently
+inert against it; it was verified instead by creating a temporary
+`NOSUPERUSER` role locally and confirming empty-`app.tenant_id` reads
+return 0 rows and a mismatched-tenant `INSERT` is rejected (11.12's Stage 2
+row). **Before relying on RLS in any real environment (including staging),
+confirm the app's DB user is not a superuser/RDS-master role** — AWS RDS's
+default master user is `rds_superuser`, a restricted role that (unlike a
+true Postgres superuser) does **not** bypass RLS, but a hand-rolled EC2/
+self-managed Postgres's default user typically is a true superuser and
+would need a dedicated, non-superuser application role.
+
+### 11.9b Login now requires a tenant code
+
+`username` is unique per tenant, not globally (11.9.4), so `POST
+/auth/login` alone can't disambiguate which tenant's `admin1` is signing
+in. Rather than inventing a non-standard field, the tenant code rides in
+the OAuth2 password-grant form's existing optional `client_id` field (e.g.
+`client_id=MONITOU-001`) — this keeps `/auth/login` working with
+`OAuth2PasswordBearer`'s standard flow and Swagger's built-in Authorize
+dialog, which already has a `client_id` input. The Windows client's login
+screen (Stage 6+) needs a tenant-code field added alongside username/
+password; it isn't there yet since Phase 8 predates tenancy.
+
+### 11.10 Code-review checklist addition (Section 7 extension)
+
+Once tenancy lands, add to Section 7's guardrails: every new query against
+a tenant-scoped table must go through the `tenant_scoped()` helper or rely
+on RLS being enabled for that table (verified once per table, not
+per-query); every new unique constraint on a tenant-scoped table must
+include `tenant_id`; every new endpoint accepting an entity ID must be
+covered by a cross-tenant-403/404 test (11.11).
+
+### 11.11 Test plan (Stage 14, tracked here so it isn't lost)
+
+Basic user blocked from Essential-only endpoint; Essential user blocked from
+Enterprise-only endpoint; Enterprise user passes all feature gates; 6th user
+create on Basic returns `PLAN_LIMIT_REACHED`; 2nd warehouse blocked on
+Basic, allowed on Essential, 3rd blocked on Essential; feature override
+unlocks a restricted feature for one tenant without touching its plan;
+limit override raises capacity for one tenant; `FeatureGate` renders
+hide/lock/disable correctly per mode and per entitlement snapshot; manually
+calling a restricted API with a crafted request still 403s; Tenant A
+request for a Tenant B record ID 404s; plan upgrade leaves all existing
+tenant data byte-for-byte unchanged; plan downgrade below current usage
+preserves existing rows and blocks only new creation; expired-tenant
+behavior matches the configured grace-period policy at each status.
+
+### 11.12 Staged build status
+
+| Stage | Scope | Status |
+|---|---|---|
+| 1 | Plan/Feature/PlanFeature/PlanLimit/Tenant/Subscription/TenantFeatureOverride/TenantLimitOverride/UsageCounter schema + migration; `plan_catalog.py` + `seed_plans.py` seeding 3 plans, 80 features, plan_features, plan_limits | **Done** — migration `27ff755cb588`, verified idempotent, `28/62/80` features per plan confirmed against spec |
+| 2 | `tenant_id` on every business table + backfill + RLS + `get_current_tenant` + JWT claim + per-tenant unique constraints (11.9.4) | **Done** — migrations `4c4b99b6eb8b` (backfill, per-tenant `UNIQUE(tenant_id, ...)` on `users.username`/`products.sku`/`barcodes.barcode_value`/`sales.invoice_number`) + `9196eb11b8d2` (RLS); `app/tenancy.py` (`tenant_scoped`, `get_tenant_owned`, `set_rls_tenant`); every router/service now scopes by `tenant_id`; `low_stock_alerts.py` job loops per-tenant. Cross-tenant isolation tests in `tests/test_tenancy.py`. RLS **verified against real Postgres with a non-superuser role**: 0 rows visible with `app.tenant_id` unset, correct rows for the right tenant, `INSERT` of a row claiming a different tenant is rejected — see 11.9a. |
+| 3 | `services/entitlements.py` (`can_use_feature`, `require_feature`) | **Done** — resolution order override-then-plan-then-deny; `require_feature()` FastAPI dependency raises the exact `FEATURE_NOT_AVAILABLE` structured 403 from 11.6, with `required_plan` and the plan-list message computed live from `PlanFeature` (never hard-coded). 12 tests in `tests/test_entitlements.py`, built against the real seeded catalog rather than fixture rows. Not yet wired to any router — that's Stage 5. |
+| 4 | `services/usage_limits.py` (`check_limit`, `increment_usage`/`decrement_usage`) wired into user creation (first consumer, since `users` already exists) | **Done, plus one more consumer** — wired into both `POST /users` (MAX_USERS; this endpoint didn't exist before, added since Stage 4 needed a create-user flow to enforce against) and `POST /products` (MAX_SKUS, since that create-flow already existed). Branches/warehouses have no backing module yet (11.1) so their counters exist but nothing increments them. One-time `app/reconcile_usage_counters.py` backfills `usage_counters` for tenants whose users/products predate this stage — run and verified against the local dev tenant (2 users, 18 products, matches exactly). 7 tests in `tests/test_usage_limits.py`, including the exact `PLAN_LIMIT_REACHED` message from the spec and override-raises-capacity. |
+| 5 | Apply `require_feature`/`check_limit` guards to existing routers (products, users, purchase_orders, sales) — the only routers that exist today | **Done** — every existing router now depends on `require_feature`: `products.py` → `PRODUCT_MASTER`, `stock.py` → `STOCK_ADJUSTMENT`/`GRN`/`STOCK_LEDGER`, `sales.py` → `BASIC_SALES_ORDER`, `reports.py` → `BASIC_REPORTS`/`LOW_STOCK_ALERT` plus a **per-field** gate on `stock-stats` (`fastest_moving`/`slowest_moving` nulled out without `FAST_MOVING_ANALYSIS`/`SLOW_MOVING_ANALYSIS` — same pattern as `ProductRead` vs `ProductReadPublic`, plan-driven instead of role-driven). `users.py` deliberately left ungated (11.5: base user management isn't a catalog feature). `barcodes.py` splits the judgment call explicitly in code comments: `POST /barcodes` (admin catalog management) → `BARCODE_GENERATION` (Essential+); `GET /barcodes/search` and `GET /barcodes/{value}` (checkout-time lookup) stay under `BASIC_SALES_ORDER` since gating them behind `BARCODE_SCAN` would break Basic-tier POS checkout, which this app's entire billing flow depends on — see the reasoning at the top of Stage 5's router diff. 5 new tests in `tests/test_feature_guards.py` (Basic blocked from creating a barcode with the exact spec message, Essential/Enterprise allowed, stock-stats analytics fields suppressed/shown correctly). Full suite: 66 passed, 1 pre-existing unrelated failure. |
+| 6 | `useFeature`, `<FeatureGate>`, `GET /tenant/me/entitlements` | **Done** — `GET /tenant/me/entitlements` (`app/routers/tenant.py`) returns `{ plan_code, plan_name, tenant_status, features: {code: bool}, feature_info: {code: {name, required_plan, message}}, limits: {code: {used, max}} }` for the full 80-code catalog and all four limit codes; `feature_info`/`feature_not_available_error` now share one `describe_feature()` so the frontend's locked-feature text and the backend's 403 message can never drift apart. Frontend: `hooks/useEntitlements.ts` (`useEntitlements`/`useFeature`/`useFeatureInfo`/`useLimit`, React Query-cached, 5min staleTime — entitlements change on a plan/override event, not per-render) and `components/FeatureGate.tsx` (`hide`/`lock`/`disable` modes; `lock` renders a card with `LockIcon` + the plan-static message + an inert "View plans" CTA, wired to a real target once Stage 9/10 exist). 3 backend tests + 4 frontend logic tests (`resolveFeature`, fails closed on missing/loading data) — `tsc --noEmit` and `npm test` both clean. **Not yet wired into any screen** — nothing renders `<FeatureGate>` yet, that's Stage 8's job (sidebar) and beyond; consistent with Phase 8's noted jsdom/tabster limitation, this couldn't be render-tested either, only logic-tested + typechecked. |
+| 7 | *(folded into Stage 1 — done alongside schema since seeding is needed to verify the schema at all)* | Done |
+| 8 | Plan-aware sidebar in the client | **Done, as a top tab bar** — this app has a top `TabList` (Section 8's original UI), not a sidebar; per the spec's own "maintain consistent UX, avoid completely different app layouts" instruction, Stage 8 made *that* plan-aware rather than introducing a new sidebar layout the rest of the app doesn't have. `App.tsx` now drives both the tab list and the content panel off one `NAV_ITEMS` config (`{key, label, requiredFeature, adminOnly, render}`), each item wrapped in `<FeatureGate mode="hide">` for the plan layer plus an explicit `role === "admin"` check for the RBAC layer — the two-layer principle from CLAUDE.md's "IMPORTANT DESIGN PRINCIPLE" made literal in the nav code, not just in routers. Added **BarcodeAdmin.tsx** (new screen + `api.createBarcode()`) as the first real differentiated nav item — `POST /barcodes` had a backend endpoint since Stage 5 but no UI at all; gated by `BARCODE_GENERATION`, it's the one tab that actually appears/disappears by plan today (every other existing screen maps to an always-on Basic-tier feature, so this was necessary to have anything to demonstrate). `tsc --noEmit` clean, 13/13 client tests pass. **Verification limitation surfaced and documented, not hidden:** both `@tauri-apps/plugin-http` (used for every API call) and `@tauri-apps/plugin-store` (session persistence) require the real Tauri IPC bridge and throw `Cannot read properties of undefined (reading 'invoke')` outside an actual Tauri window — confirmed by hand against a plain browser tab, consistent with Phase 8's existing note that this app was never browser-tested, only run as the real Tauri binary. This blocks claude-in-chrome-based visual verification entirely (not just component-render-testing, which was already known-blocked); full UI verification of Stage 8 needs `npm run tauri dev` on a machine with the Rust toolchain, not done here. Along the way, fixed two related pre-existing robustness gaps unrelated to plan-gating itself but that this exercise surfaced: `AppContext.tsx`'s `restoreSession()` and `Login.tsx`'s `saveSession()` calls had no `.catch()`, so a `plugin-store` failure (missing Tauri context, or in production a corrupted store file) left the app on a permanent blank screen or silently dropped a successful login — both now fail soft instead of fail blank. Two demo tenants (`DEMO-BASIC`, `DEMO-ESSENTIAL`, user `admin`/`demo1234`) were seeded into the local dev Postgres for this and left in place for future manual testing. |
+| 9 | Plan & Subscription settings page | **Done** — new `Subscription`-lookup service (`app/services/subscriptions.py`: `get_current_subscription`, `ensure_subscription`) since no tenant had a subscription row before this stage; `GET /tenant/me/entitlements` extended with a `subscription: {status, start_date, end_date, renewal_date, setup_fee, annual_amc} \| None` field and `feature_info[code].module` (needed to group "enabled capabilities" by module on the page). Frontend: `screens/PlanSubscription.tsx` under the new admin-only "Settings" tab — current plan/setup package, account status, subscription status + AMC dates, a usage bar per limit code (colors shift brand→warning→error near/at the cap), and enabled capabilities grouped by module as badges. "View Plans"/"Request Upgrade" are present but stubbed (show an inline notice) — Stage 10 doesn't exist yet to navigate to, and per the spec neither button may change the plan directly regardless. "Settings" is the first nav item with no `requiredFeature` — it has to stay reachable on every plan, including the one it's telling you to upgrade off of. 4 backend tests (including the exact subscription fields against Basic's real pricing), `tsc --noEmit` clean, 13/13 client tests. Backfilled subscription rows for the 3 existing dev-Postgres tenants (`MONITOU-001`, `DEMO-BASIC`, `DEMO-ESSENTIAL`). Live browser verification still blocked by the Tauri-IPC limitation noted in Stage 8 — not re-attempted, same root cause. |
+| 10 | Upgrade comparison screen | **Done** — new `upgrade_requests` table (migration `f7481532a996`; not RLS-protected, same deferral reasoning as `tenant_feature_overrides`/`tenant_limit_overrides`/`subscriptions` in 11.9a: Platform Admin needs cross-tenant access and that bypass role doesn't exist until Stage 11) plus `services/plan_comparison.py::build_plan_comparison` — deliberately reads `PlanFeature` defaults, not `can_use_feature()`, since a comparison chart answers "what does each plan normally include," not "what does this one tenant have after its overrides." Three new endpoints: `GET /tenant/me/plan-comparison`, `POST`/`GET /tenant/me/upgrade-requests` (admin-only; creates a `pending` row and **never** touches `Tenant.active_plan_id` — approving/rejecting is Platform Admin's job, Stage 11+). Frontend: `screens/PlanComparison.tsx` — 3-column table (Basic/Essential/Enterprise), current plan badged, Essential badged "Recommended", every catalog feature as a ✓/— row grouped by module, and a "Request upgrade" button per non-current plan (swaps to "Upgrade requested" once a pending request exists) opening a confirmation dialog with an optional note. `PlanSubscription.tsx`'s "View Plans"/"Request Upgrade" buttons now actually navigate here (replacing Stage 9's stub) via a plain `useState` toggle — no router added, consistent with this app's existing tab-switching pattern. 6 new backend tests (current/recommended flags, exact plan pricing, upgrade request creates without changing the tenant's plan, rejects same-plan/unknown-plan/non-admin, list scoped per tenant) — 76/77 backend total (1 pre-existing unrelated). `tsc --noEmit` clean, 13/13 client tests. Live browser verification still blocked by the Stage 8 Tauri-IPC limitation. |
+| 11 | Platform Super Admin area (separate auth space per 11.9.6) | **Done, backend and frontend** — `platform_admins` (separate table, no `tenant_id`, no relation to `users`) and `platform_audit_log` (append-only). New JWT audience claim (`aud: "tenant-user"` vs `"platform-admin"`) is the actual separation mechanism — `get_current_user` and the new `get_current_platform_admin` (`auth/platform_deps.py`) each reject the other's token outright, verified by test in both directions. **Correction while building this:** `TenantFeatureOverride.approved_by`/`TenantLimitOverride.approved_by`/`UpgradeRequest.decided_by` were wrongly FK'd to `users.id` back in Stages 1/10 — overrides and upgrade-request decisions are exclusively Platform Admin actions, so they're re-pointed at `platform_admins.id` (no real data existed in those columns yet, so a straight migration fix, not a backfill). Endpoints: dashboard stats, tenant list, tenant detail (including the tenant's `users` — the one place this stage reads an RLS-protected table cross-tenant, worked around by calling `set_rls_tenant` for that one tenant first; see the long comment atop `routers/platform_admin.py` for why a real `BYPASSRLS` platform-admin DB role is still an open production-infra item), change-plan (also auto-approves a matching pending `UpgradeRequest`, closing the Stage 10 loop), feature-override, limit-override, suspend/reactivate (suspend immediately blocks that tenant's `/auth/login`, verified), extend-subscription, and per-tenant audit-log — every mutating one writes an audit row in the same transaction, reason is a required field (422 without one). Downgrade-impact *reporting* before a plan change is explicitly left to Stage 13 — today a downgrade is allowed and data is preserved, with `check_limit` naturally blocking new creates past the lower cap. 16 new tests, 92/93 backend total (1 pre-existing unrelated). Dev platform admin seeded (`app/seed_platform_admin.py`, env-var credentials with a loud dev-only fallback). **Frontend** (user's explicit choice: same Tauri client, not a separate web app): `client/src/platformAdmin/` — its own login screen (no shop-code field, no persisted session — a platform operator re-authenticates every launch by design), its own `ApiClient.platformAdminToken` completely separate from the tenant `token` field (mirrors the backend's two audiences; neither token is ever sent on the other's requests), and its own shell (`PlatformAdminApp.tsx`, visibly different header color/chrome, not another tab in `MainApp`'s `TabList`) with Dashboard and Tenants (list → detail, six action forms, audit log table). Reached via a "Platform admin sign in" link on the tenant `Login.tsx`. `tsc --noEmit` clean, 13/13 client tests. Live browser verification blocked by the same Tauri-IPC limitation as every frontend stage since Stage 8 — not re-attempted. **Follow-up fix:** a real gap was found post-ship — an upgrade request only ever surfaced if an admin happened to open that exact tenant and manually change its plan; there was no cross-tenant inbox. Added `GET /platform-admin/upgrade-requests` (defaults to pending only, `include_decided=true` for history), `POST .../upgrade-requests/{id}/approve` (delegates straight to `change_plan` — same downgrade-impact `confirm` gate, same audit trail, no duplicated logic) and `.../reject`, a `pending_upgrade_requests` dashboard stat, and a new "Upgrade requests" tab (`PlatformAdminUpgradeRequests.tsx`) with per-row approve/reject dialogs. 7 new backend tests. |
+| 12 | Feature/limit override UI + audit log table + service | **Done — folded into Stage 11** — `services/platform_audit.py`, `platform_audit_log` table, and the Feature override/Limit override forms + audit-log table all shipped as part of Stage 11's tenant detail screen rather than as a separate pass, since they're the same actions on the same screen. |
+| 13 | Plan change (upgrade/downgrade) logic + downgrade-impact check | **Done** — `services/plan_change.py::assess_plan_change_impact` computes exceeded limits and lost features for a hypothetical plan switch, respecting existing `TenantFeatureOverride`/`TenantLimitOverride` rows exactly as `can_use_feature`/`check_limit` do (an override survives a plan change). New `GET .../plan-change-impact` preview endpoint; `POST .../change-plan` now requires `confirm: true` when the impact is non-empty, otherwise 409s with the impact payload attached — so a downgrade can never be applied without the operator having seen what it costs. A confirmed impact is recorded in the audit row's `new_value` for the permanent record. Frontend: the Change Plan form runs the impact check live as soon as a plan is picked, shows a warning card (exceeded limits + lost features) for anything non-empty, and gates the submit button behind an explicit "I understand" checkbox. 12 new backend tests, including two that prove the actual data-preservation claims end to end (6 users survive a forced-confirm downgrade to a 5-user-cap plan, with the 7th blocked; a product created pre-upgrade comes back byte-for-byte identical post-upgrade) — 99/100 backend total (1 pre-existing unrelated). `tsc --noEmit` clean, 13/13 client tests. Same Tauri-IPC browser-verification limit as every frontend stage since Stage 8. |
+| 14 | Tests per 11.11 + security review | **Done** — audited every item in Section 11.11's test list against what actually exists. Filled the one real functional gap it exposed: the **subscription lifecycle state machine** (Section 11.8) had never actually been built — `services/subscription_lifecycle.py` (pure `resolve_subscription_status(renewal_date, today, window, grace)`, date-driven ACTIVE→EXPIRING→EXPIRED→GRACE_PERIOD→SUSPENDED, configurable via new `settings.subscription_expiring_window_days`/`subscription_grace_period_days`) plus `sync_subscription_status`, called from both `POST /auth/login` and `get_current_user` so the transition takes effect on a tenant's very next request/login, not on some batch job's schedule. Never regresses an already-suspended tenant (manual or auto) back to active — only `extend-subscription`/`reactivate` do that; `extend-subscription` was fixed to also clear `Tenant.status` if the auto-cutoff had fired, since it hadn't needed to before this stage existed. 12 new tests, including a full login-blocked-then-restored-by-extend round trip. Two items from 11.11 are honestly not coverable in this app as it stands and are documented rather than faked: an Enterprise-*only* live endpoint gate (proven instead at the `require_feature` dependency level in `test_entitlements.py`, since no Enterprise-exclusive router exists — see Section 11.1's module gaps) and the warehouse 2nd/3rd-item limit test (no warehouse module exists at all). `FeatureGate` hide/lock/disable render-testing was re-attempted directly against `FluentProvider` itself (not just a screen) and confirmed to hit the exact same `tabster`/Vitest module-resolution failure documented in Phase 8 — this is a repo-wide Vitest/Fluent incompatibility, not something scoped to admin screens; logic-only coverage (`resolveFeature`) stands in for it. **Security review** (via the `security-review` skill, two-stage identify-then-filter): one candidate finding — `services/stock_ledger.py::record_movement`'s idempotency lookup used a bare `session.get(StockMovement, id)` with no tenant filter, inconsistent with the identical idempotency pattern in `services/sales.py` (`get_tenant_owned`). Filtered out as not actionable (2/10 confidence) because the only attack path requires guessing another tenant's unguessable UUIDv4 idempotency key with no oracle anywhere in the app to shortcut it — but fixed anyway since it's a one-line, zero-risk consistency fix now scoped by `get_tenant_owned` like everywhere else. Full suite: 111/112 backend passing (1 pre-existing, unrelated to this project — a macOS system-library gap in WeasyPrint), 13/13 client. |
+
+Stages 2+ build **on top of** the schema from Stage 1 but require deciding,
+before writing code, which of the missing modules (11.1) get built now vs.
+deferred — that's a scope call for whoever's driving next, not something to
+infer silently.
+
+### 11.13 Platform Super Admin — design note
+
+Separate `platform_admins` table and separate JWT audience/issuer (or a
+distinct `aud` claim) from tenant `users` — never reuse `UserRole.admin`.
+Platform admin actions (change plan, override feature/limit, suspend/
+reactivate tenant, extend subscription) each write a `platform_audit_log`
+row: who, when, action, tenant_id, old_value, new_value, reason. Design
+this table in Stage 11, not Stage 1, since it has no bearing on tenant-side
+schema.

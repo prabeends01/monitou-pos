@@ -1,16 +1,22 @@
 from fastapi.testclient import TestClient
 
 from app.models.user import User
+from tests.conftest import OTHER_TENANT_CODE, TEST_TENANT_CODE
 
 
-def login(client: TestClient, username: str, password: str) -> str:
-    resp = client.post("/auth/login", data={"username": username, "password": password})
+def login(client: TestClient, username: str, password: str, tenant_code: str = TEST_TENANT_CODE) -> str:
+    resp = client.post(
+        "/auth/login", data={"username": username, "password": password, "client_id": tenant_code}
+    )
     assert resp.status_code == 200, resp.text
     return resp.json()["access_token"]
 
 
 def test_login_success(client: TestClient, admin_user: User):
-    resp = client.post("/auth/login", data={"username": "admin1", "password": "adminpass"})
+    resp = client.post(
+        "/auth/login",
+        data={"username": "admin1", "password": "adminpass", "client_id": TEST_TENANT_CODE},
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["role"] == "admin"
@@ -18,7 +24,36 @@ def test_login_success(client: TestClient, admin_user: User):
 
 
 def test_login_wrong_password(client: TestClient, admin_user: User):
-    resp = client.post("/auth/login", data={"username": "admin1", "password": "wrong"})
+    resp = client.post(
+        "/auth/login",
+        data={"username": "admin1", "password": "wrong", "client_id": TEST_TENANT_CODE},
+    )
+    assert resp.status_code == 401
+
+
+def test_login_wrong_tenant_code(client: TestClient, admin_user: User):
+    """Right username/password, wrong tenant_code — must fail exactly like a
+    wrong password, not reveal that the username exists elsewhere."""
+    resp = client.post(
+        "/auth/login",
+        data={"username": "admin1", "password": "adminpass", "client_id": "NO-SUCH-TENANT"},
+    )
+    assert resp.status_code == 401
+
+
+def test_login_same_username_different_tenants(client: TestClient, admin_user: User, other_tenant_admin_user: User):
+    """`admin1` exists in both Tenant A and Tenant B with different
+    passwords — usernames are only unique per tenant, not globally."""
+    resp = client.post(
+        "/auth/login",
+        data={"username": "admin1", "password": "otherpass", "client_id": OTHER_TENANT_CODE},
+    )
+    assert resp.status_code == 200
+
+    resp = client.post(
+        "/auth/login",
+        data={"username": "admin1", "password": "otherpass", "client_id": TEST_TENANT_CODE},
+    )
     assert resp.status_code == 401
 
 

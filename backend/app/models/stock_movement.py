@@ -18,6 +18,7 @@ class StockMovement(SQLModel, table=True):
     __tablename__ = "stock_movements"
 
     id: uuid.UUID = Field(primary_key=True)
+    tenant_id: uuid.UUID = Field(foreign_key="tenants.id", index=True)
     product_id: uuid.UUID = Field(foreign_key="products.id", index=True)
     qty_base_units: int
     movement_type: MovementType

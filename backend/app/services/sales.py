@@ -7,22 +7,26 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.models.barcode import Barcode
+from app.models.customer import Customer
 from app.models.product import Product
 from app.models.sale import Sale, SaleItem
 from app.models.stock_movement import MovementType
 from app.schemas.sale import SaleCreate
 from app.services.stock_ledger import record_movement
+from app.tenancy import get_tenant_owned
 
 _MAX_INVOICE_NUMBER_ATTEMPTS = 3
 
 
-def _next_invoice_number(session: Session, series: str) -> str:
+def _next_invoice_number(session: Session, tenant_id: uuid.UUID, series: str) -> str:
     """Next sequential number for `series` — max existing numeric suffix + 1,
     starting at 1001. Full-series scan; fine at this app's scale (a spare
     parts shop's invoice volume), see CLAUDE.md's stated no-premature-
     optimization approach for similar low-volume queries."""
     prefix = f"{series}-"
-    existing = session.exec(select(Sale.invoice_number).where(Sale.invoice_series == series)).all()
+    existing = session.exec(
+        select(Sale.invoice_number).where(Sale.tenant_id == tenant_id, Sale.invoice_series == series)
+    ).all()
     max_seq = 1000
     for invoice_number in existing:
         suffix = invoice_number.removeprefix(prefix)
@@ -31,10 +35,11 @@ def _next_invoice_number(session: Session, series: str) -> str:
     return f"{prefix}{max_seq + 1}"
 
 
-def create_sale(session: Session, payload: SaleCreate, *, cashier_id: uuid.UUID) -> Sale:
+def create_sale(session: Session, payload: SaleCreate, *, tenant_id: uuid.UUID, cashier_id: uuid.UUID) -> Sale:
     """Write a sale, its line items, and matching stock_movements (sale type)
-    in one transaction. Idempotent by `payload.id` — a retried request with
-    the same sale is a no-op, not a double-counted sale.
+    in one transaction, all scoped to `tenant_id`. Idempotent by `payload.id`
+    — a retried request with the same sale is a no-op, not a double-counted
+    sale.
 
     Each item's `qty_base_units` is the final, client-authoritative quantity
     (see SaleItemCreate) — not re-derived from the barcode's `pack_qty`, so a
@@ -44,24 +49,26 @@ def create_sale(session: Session, payload: SaleCreate, *, cashier_id: uuid.UUID)
     sequential number for `payload.invoice_series` (see `_next_invoice_number`),
     retrying on the rare chance of a concurrent collision.
     """
-    existing = session.get(Sale, payload.id)
+    existing = get_tenant_owned(session, Sale, payload.id, tenant_id)
     if existing is not None:
-        session.refresh(existing)
         return existing
 
     if not payload.items:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="sale must have items")
 
+    if payload.customer_id is not None and get_tenant_owned(session, Customer, payload.customer_id, tenant_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"customer {payload.customer_id} not found")
+
     total_amount = Decimal("0")
     sale_items: list[SaleItem] = []
 
     for item in payload.items:
-        product = session.get(Product, item.product_id)
+        product = get_tenant_owned(session, Product, item.product_id, tenant_id)
         if product is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"product {item.product_id} not found")
 
         if item.barcode_id is not None:
-            barcode = session.get(Barcode, item.barcode_id)
+            barcode = get_tenant_owned(session, Barcode, item.barcode_id, tenant_id)
             if barcode is None or barcode.product_id != item.product_id:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -80,6 +87,7 @@ def create_sale(session: Session, payload: SaleCreate, *, cashier_id: uuid.UUID)
         sale_items.append(
             SaleItem(
                 id=item.id,
+                tenant_id=tenant_id,
                 sale_id=payload.id,
                 product_id=item.product_id,
                 barcode_id=item.barcode_id,
@@ -92,10 +100,15 @@ def create_sale(session: Session, payload: SaleCreate, *, cashier_id: uuid.UUID)
     attempts = _MAX_INVOICE_NUMBER_ATTEMPTS if auto_assign else 1
 
     for attempt in range(1, attempts + 1):
-        invoice_number = _next_invoice_number(session, payload.invoice_series) if auto_assign else payload.invoice_number
+        invoice_number = (
+            _next_invoice_number(session, tenant_id, payload.invoice_series)
+            if auto_assign
+            else payload.invoice_number
+        )
 
         sale = Sale(
             id=payload.id,
+            tenant_id=tenant_id,
             invoice_number=invoice_number,
             invoice_series=payload.invoice_series,
             customer_id=payload.customer_id,
@@ -126,6 +139,7 @@ def create_sale(session: Session, payload: SaleCreate, *, cashier_id: uuid.UUID)
         record_movement(
             session,
             id=sale_item.id,
+            tenant_id=tenant_id,
             product_id=sale_item.product_id,
             qty_base_units=-sale_item.qty_base_units,
             movement_type=MovementType.sale,

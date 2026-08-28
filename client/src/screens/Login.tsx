@@ -77,12 +77,18 @@ const useStyles = makeStyles({
   },
 });
 
-export default function Login() {
+export default function Login({ onPlatformAdminLogin }: { onPlatformAdminLogin?: () => void }) {
   const styles = useStyles();
   const { api } = useAppServices();
   const loggedIn = useSessionStore((s) => s.loggedIn);
   const loggedOutReason = useSessionStore((s) => s.loggedOutReason);
   const clearLoggedOutReason = useSessionStore((s) => s.clearLoggedOutReason);
+  // remembered per-terminal so a cashier isn't retyping the shop code every
+  // login — this identifies the tenant, it's not a secret, so plain
+  // localStorage is fine (unlike the JWT, which goes through plugin-store).
+  const [tenantCode, setTenantCode] = useState(
+    () => localStorage.getItem("monitou_tenant_code") ?? ""
+  );
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -90,19 +96,30 @@ export default function Login() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!username || !password) {
-      setError("Enter username and password");
+    if (!tenantCode || !username || !password) {
+      setError("Enter shop code, username, and password");
       return;
     }
     setSubmitting(true);
     setError(null);
     try {
-      const role = await api.login(username, password);
-      if (api.token) await saveSession({ token: api.token, role: role as Role, username });
+      const role = await api.login(tenantCode, username, password);
+      localStorage.setItem("monitou_tenant_code", tenantCode);
+      if (api.token) {
+        // Persisting the session (so the cashier isn't asked to log in
+        // again next launch) is a convenience, not a login requirement —
+        // don't let a plugin-store failure (e.g. a corrupted store file)
+        // block a successful authentication from taking effect.
+        try {
+          await saveSession({ token: api.token, role: role as Role, username });
+        } catch (persistErr) {
+          console.error("saveSession failed; continuing without a persisted session", persistErr);
+        }
+      }
       loggedIn(role as Role, username);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
-        setError("Incorrect username or password");
+        setError("Incorrect shop code, username, or password");
       } else {
         setError(err instanceof Error ? err.message : "Cannot reach server");
       }
@@ -133,8 +150,16 @@ export default function Login() {
           </MessageBar>
         )}
         <div className={styles.form}>
+          <Field label="Shop code">
+            <Input
+              value={tenantCode}
+              onChange={(_, data) => setTenantCode(data.value)}
+              autoFocus
+              size="large"
+            />
+          </Field>
           <Field label="Username">
-            <Input value={username} onChange={(_, data) => setUsername(data.value)} autoFocus size="large" />
+            <Input value={username} onChange={(_, data) => setUsername(data.value)} size="large" />
           </Field>
           <Field label="Password" validationMessage={error ?? undefined} validationState={error ? "error" : "none"}>
             <Input
@@ -148,6 +173,11 @@ export default function Login() {
             {submitting ? "Logging in…" : "Log in"}
           </Button>
         </div>
+        {onPlatformAdminLogin && (
+          <Button appearance="transparent" size="small" onClick={onPlatformAdminLogin} type="button">
+            Platform admin sign in
+          </Button>
+        )}
       </form>
     </div>
   );

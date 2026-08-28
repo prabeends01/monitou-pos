@@ -10,6 +10,7 @@ from app.models.product import Product
 from app.models.sale import Sale, SaleItem
 from app.schemas.reports import LowStockAlert, SalesSummaryBucket, StockMoverEntry, StockStats, TopProduct
 from app.services.stock_ledger import get_balance
+from app.tenancy import tenant_scoped
 
 Period = Literal["daily", "weekly", "monthly"]
 
@@ -25,10 +26,10 @@ def _bucket_start(dt: datetime, period: Period) -> datetime:
 
 
 def sales_summary(
-    session: Session, *, period: Period, from_: datetime, to: datetime
+    session: Session, *, tenant_id: uuid.UUID, period: Period, from_: datetime, to: datetime
 ) -> list[SalesSummaryBucket]:
     sales = session.exec(
-        select(Sale).where(Sale.created_at_client >= from_, Sale.created_at_client <= to)
+        tenant_scoped(Sale, tenant_id).where(Sale.created_at_client >= from_, Sale.created_at_client <= to)
     ).all()
 
     buckets: dict[datetime, list[Sale]] = defaultdict(list)
@@ -39,7 +40,9 @@ def sales_summary(
     for bucket_start in sorted(buckets):
         bucket_sales = buckets[bucket_start]
         sale_ids = [s.id for s in bucket_sales]
-        items = session.exec(select(SaleItem).where(SaleItem.sale_id.in_(sale_ids))).all()
+        items = session.exec(
+            select(SaleItem).where(SaleItem.tenant_id == tenant_id, SaleItem.sale_id.in_(sale_ids))
+        ).all()
 
         per_product: dict[uuid.UUID, dict] = defaultdict(lambda: {"qty": 0, "revenue": Decimal("0")})
         for item in items:
@@ -71,8 +74,8 @@ def sales_summary(
     return result
 
 
-def stock_stats(session: Session) -> StockStats:
-    products = session.exec(select(Product)).all()
+def stock_stats(session: Session, *, tenant_id: uuid.UUID) -> StockStats:
+    products = session.exec(tenant_scoped(Product, tenant_id)).all()
 
     total_stock_value = Decimal("0")
     out_of_stock_count = 0
@@ -80,7 +83,7 @@ def stock_stats(session: Session) -> StockStats:
     balances: dict[uuid.UUID, int] = {}
 
     for product in products:
-        balance = get_balance(session, product.id)
+        balance = get_balance(session, tenant_id, product.id)
         balances[product.id] = balance
         total_stock_value += product.cost_price * balance
         if balance <= 0:
@@ -92,7 +95,7 @@ def stock_stats(session: Session) -> StockStats:
     recent_items = session.exec(
         select(SaleItem, Sale.created_at_client)
         .join(Sale, Sale.id == SaleItem.sale_id)
-        .where(Sale.created_at_client >= since)
+        .where(Sale.tenant_id == tenant_id, Sale.created_at_client >= since)
     ).all()
 
     sold_30d: dict[uuid.UUID, int] = defaultdict(int)
@@ -116,17 +119,19 @@ def stock_stats(session: Session) -> StockStats:
     )
 
 
-def low_stock_products(session: Session) -> list[LowStockAlert]:
+def low_stock_products(session: Session, *, tenant_id: uuid.UUID) -> list[LowStockAlert]:
     """Products at or below their reorder_threshold, sorted by how far below.
 
     Shared by GET /reports/low-stock-alerts and the scheduled digest job —
     keep this the single source of truth for "what counts as low stock".
     """
-    products = session.exec(select(Product).where(Product.is_active == True)).all()  # noqa: E712
+    products = session.exec(
+        tenant_scoped(Product, tenant_id).where(Product.is_active == True)  # noqa: E712
+    ).all()
 
     alerts: list[LowStockAlert] = []
     for product in products:
-        balance = get_balance(session, product.id)
+        balance = get_balance(session, tenant_id, product.id)
         if balance <= product.reorder_threshold:
             alerts.append(
                 LowStockAlert(

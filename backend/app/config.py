@@ -14,5 +14,11 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 12
 
+    # Subscription lifecycle (CLAUDE.md Section 11.8) — "architecture should
+    # allow a configurable grace period," so these are settings, not
+    # constants baked into services/subscription_lifecycle.py.
+    subscription_expiring_window_days: int = 30  # ACTIVE -> EXPIRING starts this many days before renewal_date
+    subscription_grace_period_days: int = 15  # EXPIRED -> GRACE_PERIOD lasts this many days past renewal_date
+
 
 settings = Settings()

@@ -7,6 +7,8 @@ from app.models.barcode import Barcode
 from app.models.product import Product
 from app.models.user import User, UserRole
 from app.schemas.barcode import BarcodeCreate, BarcodeRead, BarcodeScanResult
+from app.services.entitlements import require_feature
+from app.tenancy import get_tenant_owned
 
 router = APIRouter(prefix="/barcodes", tags=["barcodes"])
 
@@ -26,13 +28,24 @@ def _to_scan_result(barcode: Barcode, product: Product) -> BarcodeScanResult:
 async def create_barcode(
     payload: BarcodeCreate,
     session: Session = Depends(get_session),
-    _admin: User = Depends(require_role(UserRole.admin)),
+    admin: User = Depends(require_role(UserRole.admin)),
+    # BARCODE_GENERATION (Essential+) gates *creating* a new barcode/pack-size
+    # mapping for the catalog — an admin catalog-management capability. It
+    # does not gate scanning an existing one during checkout (below); that's
+    # core to BASIC_SALES_ORDER, which every plan has. See CLAUDE.md
+    # Section 11 Stage 5 for why the line is drawn here.
+    _feature: None = Depends(require_feature("BARCODE_GENERATION")),
 ) -> Barcode:
-    if session.get(Product, payload.product_id) is None:
+    if get_tenant_owned(session, Product, payload.product_id, admin.tenant_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="product not found")
-    if session.exec(select(Barcode).where(Barcode.barcode_value == payload.barcode_value)).first():
+    exists = session.exec(
+        select(Barcode).where(
+            Barcode.tenant_id == admin.tenant_id, Barcode.barcode_value == payload.barcode_value
+        )
+    ).first()
+    if exists:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="barcode already exists")
-    barcode = Barcode.model_validate(payload)
+    barcode = Barcode(tenant_id=admin.tenant_id, **payload.model_dump())
     session.add(barcode)
     session.commit()
     session.refresh(barcode)
@@ -44,7 +57,8 @@ async def search_barcodes(
     q: str = Query(..., min_length=1),
     limit: int = Query(8, ge=1, le=50),
     session: Session = Depends(get_session),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
+    _feature: None = Depends(require_feature("BASIC_SALES_ORDER")),
 ) -> list[BarcodeScanResult]:
     """Live search for POS billing — matches barcode value, SKU, or product
     name in one query, ranked so an exact barcode/SKU match wins, then a
@@ -56,6 +70,8 @@ async def search_barcodes(
         select(Barcode, Product)
         .join(Product, Product.id == Barcode.product_id)
         .where(
+            Barcode.tenant_id == user.tenant_id,
+            Product.tenant_id == user.tenant_id,
             Product.is_active == True,  # noqa: E712
             or_(
                 Barcode.barcode_value.ilike(pattern),
@@ -79,13 +95,16 @@ async def search_barcodes(
 async def scan_barcode(
     barcode_value: str,
     session: Session = Depends(get_session),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
+    _feature: None = Depends(require_feature("BASIC_SALES_ORDER")),
 ) -> BarcodeScanResult:
     """Resolve a scanned barcode to its product and base-unit multiplier (pack_qty)."""
-    barcode = session.exec(select(Barcode).where(Barcode.barcode_value == barcode_value)).first()
+    barcode = session.exec(
+        select(Barcode).where(Barcode.tenant_id == user.tenant_id, Barcode.barcode_value == barcode_value)
+    ).first()
     if barcode is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="barcode not found")
-    product = session.get(Product, barcode.product_id)
+    product = get_tenant_owned(session, Product, barcode.product_id, user.tenant_id)
     if product is None or not product.is_active:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="product not found")
     return _to_scan_result(barcode, product)

@@ -1,6 +1,6 @@
-"""Seed a realistic test dataset: users, suppliers, customers, a spare-parts
-catalog across categories, initial stock, and a spread of sample sales over
-the last 30 days (so reports/dashboard have something to show).
+"""Seed a realistic test dataset: a tenant, users, suppliers, customers, a
+spare-parts catalog across categories, initial stock, and a spread of sample
+sales over the last 30 days (so reports/dashboard have something to show).
 
 Run: uv run python -m app.seed
 """
@@ -10,21 +10,26 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.auth.security import hash_password
 from app.db import engine
-from app.models import Barcode, Customer, Product, Supplier, User, UserRole
+from app.models import Barcode, Customer, Plan, Product, Supplier, Tenant, User, UserRole
 from app.models.stock_movement import MovementType
 from app.schemas.sale import SaleCreate, SaleItemCreate
 from app.services.sales import create_sale
 from app.services.stock_ledger import record_movement
+from app.services.subscriptions import ensure_subscription
 
 random.seed(42)  # deterministic seed data across runs
 
 TERMINAL_ID = "SEED"
 INVOICE_SERIES = "SEED"  # distinct from any real terminal (T1, T2, ...) so a client's own
 # local invoice counter — which starts fresh at 1001 per series — never collides with seed data
+
+TENANT_CODE = "MONITOU-001"  # same tenant_code the tenant_id backfill migration assigned
+# existing (pre-tenancy) data to — see alembic/versions/4c4b99b6eb8b
 
 # (sku, name, category, compatible_models, cost, sale, reorder_threshold, initial_qty, box_pack_qty|None)
 PRODUCTS = [
@@ -66,25 +71,64 @@ PAYMENT_MODES = ["cash", "card", "upi"]
 LOW_STOCK_OVERRIDES = {"ELE-ALT-90A", "ELE-STARTER-01", "TIRE-28X9-15"}
 
 
+def _get_or_create_tenant(session: Session) -> Tenant:
+    # ESSENTIAL is the recommended/default commercial package — see
+    # CLAUDE.md Section 11.5. Run `uv run python -m app.seed_plans` first so
+    # this plan row exists.
+    essential = session.exec(select(Plan).where(Plan.code == "ESSENTIAL")).first()
+
+    tenant = session.exec(select(Tenant).where(Tenant.tenant_code == TENANT_CODE)).first()
+    if tenant is None:
+        tenant = Tenant(
+            tenant_code=TENANT_CODE,
+            company_name="Monitou Spare Parts",
+            active_plan_id=essential.id if essential else None,
+        )
+        session.add(tenant)
+        session.commit()
+        session.refresh(tenant)
+
+    if essential:
+        ensure_subscription(session, tenant, essential)  # idempotent — no-op if one already exists
+    return tenant
+
+
 def seed() -> None:
     with Session(engine) as session:
-        if session.exec(select(Product)).first():
+        tenant = _get_or_create_tenant(session)
+
+        # RLS (migration 9196eb11b8d2) forces every write on a business
+        # table to satisfy `tenant_id = current_setting('app.tenant_id')`.
+        # A plain `SET` (not `SET LOCAL`) is deliberate here — unlike the
+        # request path (`tenancy.set_rls_tenant`, transaction-scoped so a
+        # pooled connection can't carry it into someone else's request),
+        # this script owns its connection for its whole run and commits
+        # repeatedly, so the setting needs to survive across commits.
+        if session.get_bind().dialect.name == "postgresql":
+            session.execute(text(f"SET app.tenant_id = '{tenant.id}'"))
+
+        if session.exec(select(Product).where(Product.tenant_id == tenant.id)).first():
             print("already seeded, skipping")
             return
 
-        admin = User(username="admin1", password_hash=hash_password("adminpass"), role=UserRole.admin)
-        cashier = User(username="sales1", password_hash=hash_password("salespass"), role=UserRole.sales)
+        admin = User(
+            tenant_id=tenant.id, username="admin1", password_hash=hash_password("adminpass"), role=UserRole.admin
+        )
+        cashier = User(
+            tenant_id=tenant.id, username="sales1", password_hash=hash_password("salespass"), role=UserRole.sales
+        )
         session.add_all([admin, cashier])
         session.commit()
         session.refresh(admin)
         session.refresh(cashier)
 
         session.add_all(
-            Supplier(name=name, phone=phone, email=email, gstin=gstin)
+            Supplier(tenant_id=tenant.id, name=name, phone=phone, email=email, gstin=gstin)
             for name, phone, email, gstin in SUPPLIERS
         )
         session.add_all(
-            Customer(name=name, phone=phone, email=email, gstin=gstin) for name, phone, email, gstin in CUSTOMERS
+            Customer(tenant_id=tenant.id, name=name, phone=phone, email=email, gstin=gstin)
+            for name, phone, email, gstin in CUSTOMERS
         )
         session.commit()
 
@@ -92,6 +136,7 @@ def seed() -> None:
         barcodes_by_product: dict[str, list[Barcode]] = {}
         for i, (sku, name, category, models, cost, sale, threshold, qty, box_pack) in enumerate(PRODUCTS):
             product = Product(
+                tenant_id=tenant.id,
                 sku=sku,
                 name=name,
                 category=category,
@@ -107,6 +152,7 @@ def seed() -> None:
             products.append(product)
 
             single = Barcode(
+                tenant_id=tenant.id,
                 product_id=product.id,
                 barcode_value=f"89000000{i:04d}1",
                 pack_qty=1,
@@ -116,6 +162,7 @@ def seed() -> None:
             barcodes_by_product[sku] = [single]
             if box_pack:
                 box = Barcode(
+                    tenant_id=tenant.id,
                     product_id=product.id,
                     barcode_value=f"89000000{i:04d}2",
                     pack_qty=box_pack,
@@ -136,6 +183,7 @@ def seed() -> None:
             record_movement(
                 session,
                 id=uuid.uuid4(),
+                tenant_id=tenant.id,
                 product_id=product.id,
                 qty_base_units=receive_qty,
                 movement_type=MovementType.purchase,
@@ -178,11 +226,11 @@ def seed() -> None:
                         )
                     ],
                 )
-                create_sale(session, payload, cashier_id=cashier.id)
+                create_sale(session, payload, tenant_id=tenant.id, cashier_id=cashier.id)
                 sale_count += 1
 
         print(
-            f"seeded 2 users (admin1/adminpass, sales1/salespass), "
+            f"seeded tenant {TENANT_CODE}, 2 users (admin1/adminpass, sales1/salespass), "
             f"{len(SUPPLIERS)} suppliers, {len(CUSTOMERS)} customers, "
             f"{len(products)} products, "
             f"{sum(len(b) for b in barcodes_by_product.values())} barcodes, "

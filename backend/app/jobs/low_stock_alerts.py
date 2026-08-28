@@ -1,17 +1,21 @@
 import logging
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.db import engine
+from app.models.tenant import Tenant, TenantStatus
 from app.services.reports import low_stock_products
 
 logger = logging.getLogger("monitou.low_stock_alerts")
 
 
 def send_low_stock_digest() -> None:
-    """Run the shared low-stock query and push a digest an admin will see
-    without opening the app.
+    """Run the shared low-stock query per tenant and push a digest an admin
+    will see without opening the app.
+
+    One tenant-scoped pass per tenant — never a single cross-tenant query
+    with tenant info stitched on afterward (see CLAUDE.md Section 11.9.5).
 
     Delivery channel (email vs. Slack/WhatsApp webhook) and frequency
     (daily vs. real-time) are open decisions — see CLAUDE.md Section 9.
@@ -19,14 +23,19 @@ def send_low_stock_digest() -> None:
     once a channel is chosen.
     """
     with Session(engine) as session:
-        alerts = low_stock_products(session)
-
-    if not alerts:
-        logger.info("low-stock digest: nothing below threshold")
-        return
-
-    lines = [f"{a.sku} {a.name}: {a.balance}/{a.reorder_threshold} (deficit {a.deficit})" for a in alerts]
-    logger.warning("low-stock digest: %d product(s) below threshold\n%s", len(alerts), "\n".join(lines))
+        tenants = session.exec(select(Tenant).where(Tenant.status == TenantStatus.active)).all()
+        for tenant in tenants:
+            alerts = low_stock_products(session, tenant_id=tenant.id)
+            if not alerts:
+                logger.info("low-stock digest [%s]: nothing below threshold", tenant.tenant_code)
+                continue
+            lines = [f"{a.sku} {a.name}: {a.balance}/{a.reorder_threshold} (deficit {a.deficit})" for a in alerts]
+            logger.warning(
+                "low-stock digest [%s]: %d product(s) below threshold\n%s",
+                tenant.tenant_code,
+                len(alerts),
+                "\n".join(lines),
+            )
 
 
 def start_scheduler(*, hour: int = 8, minute: int = 0) -> BackgroundScheduler:

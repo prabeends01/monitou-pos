@@ -1,11 +1,12 @@
 from fastapi.testclient import TestClient
 
 from app.models.user import User
+from tests.conftest import TEST_TENANT_CODE
 from tests.test_auth import login
 
 
-def auth_headers(client: TestClient, username: str, password: str) -> dict:
-    return {"Authorization": f"Bearer {login(client, username, password)}"}
+def auth_headers(client: TestClient, username: str, password: str, tenant_code: str = TEST_TENANT_CODE) -> dict:
+    return {"Authorization": f"Bearer {login(client, username, password, tenant_code)}"}
 
 
 def create_product(client: TestClient, headers: dict, sku: str = "FST-M10-BOLT") -> dict:

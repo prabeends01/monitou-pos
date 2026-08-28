@@ -2,14 +2,17 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
 class Product(SQLModel, table=True):
     __tablename__ = "products"
+    __table_args__ = (UniqueConstraint("tenant_id", "sku", name="uq_product_tenant_sku"),)
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    sku: str = Field(unique=True, index=True)
+    tenant_id: uuid.UUID = Field(foreign_key="tenants.id", index=True)
+    sku: str = Field(index=True)
     name: str
     category: str = Field(index=True)
     compatible_models: str | None = None

@@ -9,6 +9,9 @@ from app.db import get_session
 from app.models.product import Product
 from app.models.user import User, UserRole
 from app.schemas.product import ProductCreate, ProductRead, ProductReadPublic, ProductUpdate
+from app.services.entitlements import require_feature
+from app.services.usage_limits import check_limit, increment_usage
+from app.tenancy import get_tenant_owned, tenant_scoped
 
 router = APIRouter(prefix="/products", tags=["products"])
 
@@ -22,14 +25,23 @@ def _serialize(product: Product, user: User) -> ProductRead | ProductReadPublic:
 async def create_product(
     payload: ProductCreate,
     session: Session = Depends(get_session),
-    _admin: User = Depends(require_role(UserRole.admin)),
+    admin: User = Depends(require_role(UserRole.admin)),
+    _feature: None = Depends(require_feature("PRODUCT_MASTER")),
 ) -> Product:
-    if session.exec(select(Product).where(Product.sku == payload.sku)).first():
+    exists = session.exec(
+        select(Product).where(Product.tenant_id == admin.tenant_id, Product.sku == payload.sku)
+    ).first()
+    if exists:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="sku already exists")
-    product = Product.model_validate(payload)
+
+    check_limit(session, admin.tenant_id, "MAX_SKUS")
+
+    product = Product(tenant_id=admin.tenant_id, **payload.model_dump())
     session.add(product)
     session.commit()
     session.refresh(product)
+
+    increment_usage(session, admin.tenant_id, "MAX_SKUS")
     return product
 
 
@@ -37,8 +49,9 @@ async def create_product(
 async def list_products(
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
+    _feature: None = Depends(require_feature("PRODUCT_MASTER")),
 ) -> list[ProductRead | ProductReadPublic]:
-    products = session.exec(select(Product)).all()
+    products = session.exec(tenant_scoped(Product, user.tenant_id)).all()
     return [_serialize(p, user) for p in products]
 
 
@@ -47,8 +60,9 @@ async def get_product(
     product_id: uuid.UUID,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
+    _feature: None = Depends(require_feature("PRODUCT_MASTER")),
 ) -> ProductRead | ProductReadPublic:
-    product = session.get(Product, product_id)
+    product = get_tenant_owned(session, Product, product_id, user.tenant_id)
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="product not found")
     return _serialize(product, user)
@@ -59,9 +73,10 @@ async def update_product(
     product_id: uuid.UUID,
     payload: ProductUpdate,
     session: Session = Depends(get_session),
-    _admin: User = Depends(require_role(UserRole.admin)),
+    admin: User = Depends(require_role(UserRole.admin)),
+    _feature: None = Depends(require_feature("PRODUCT_MASTER")),
 ) -> Product:
-    product = session.get(Product, product_id)
+    product = get_tenant_owned(session, Product, product_id, admin.tenant_id)
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="product not found")
     for field, value in payload.model_dump(exclude_unset=True).items():
@@ -77,9 +92,10 @@ async def update_product(
 async def deactivate_product(
     product_id: uuid.UUID,
     session: Session = Depends(get_session),
-    _admin: User = Depends(require_role(UserRole.admin)),
+    admin: User = Depends(require_role(UserRole.admin)),
+    _feature: None = Depends(require_feature("PRODUCT_MASTER")),
 ) -> None:
-    product = session.get(Product, product_id)
+    product = get_tenant_owned(session, Product, product_id, admin.tenant_id)
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="product not found")
     product.is_active = False

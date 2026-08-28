@@ -102,7 +102,7 @@ def test_low_stock_alerts_endpoint_matches_shared_query(client: TestClient, admi
     assert resp.status_code == 200
     endpoint_skus = {a["sku"] for a in resp.json()}
 
-    direct_result = low_stock_products(session)
+    direct_result = low_stock_products(session, tenant_id=admin_user.tenant_id)
     direct_skus = {a.sku for a in direct_result}
 
     assert endpoint_skus == direct_skus == {product["sku"]}

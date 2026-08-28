@@ -1,14 +1,24 @@
 import { fetch } from "@tauri-apps/plugin-http";
 
 import type {
+  Barcode,
   BarcodeScanResult,
   LowStockAlert,
+  PlanChangeImpact,
+  PlanComparison,
+  PlatformAuditLogEntry,
+  PlatformDashboardStats,
+  PlatformTenantDetail,
+  PlatformTenantListRow,
+  PlatformUpgradeRequestRow,
   Product,
   Sale,
   SaleCreatePayload,
   SalesSummaryBucket,
   StockMovementResult,
   StockStats,
+  TenantEntitlements,
+  UpgradeRequest,
 } from "../types";
 
 export class ApiError extends Error {
@@ -32,19 +42,27 @@ export class ApiClient {
   private baseUrl: string;
   token: string | null = null;
   role: string | null = null;
+  /** A completely separate credential — never sent on a tenant request, and
+   * `token` above is never sent on a platform-admin request (see
+   * `platformAdminRequest` below). Mirrors the backend's separate JWT
+   * audiences (CLAUDE.md Section 11.9.6/Stage 11): this is a different
+   * operator, not an elevated tenant permission. */
+  platformAdminToken: string | null = null;
+  platformAdminUsername: string | null = null;
   /** Set once from AppContext — fires on any 401, so a stale/invalidated
    * session (e.g. the backend's database was reset, so the token's user id
    * no longer exists) kicks back to the login screen with a clear reason
    * instead of every screen just quietly showing no data. */
   onUnauthorized: ((detail: string) => void) | null = null;
+  onPlatformAdminUnauthorized: ((detail: string) => void) | null = null;
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
   }
 
-  private async request(path: string, init: RequestInit = {}): Promise<Response> {
+  private async doFetch(path: string, init: RequestInit, token: string | null): Promise<Response> {
     const headers = new Headers(init.headers);
-    if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
+    if (token) headers.set("Authorization", `Bearer ${token}`);
 
     const resp = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
     if (!resp.ok) {
@@ -55,19 +73,41 @@ export class ApiClient {
       } catch {
         // not JSON, keep raw text
       }
-      if (resp.status === 401 && this.token) {
-        this.token = null;
-        this.role = null;
-        this.onUnauthorized?.(detail);
-      }
-      throw new ApiError(resp.status, detail);
+      throw new ApiError(resp.status, typeof detail === "string" ? detail : JSON.stringify(detail));
     }
     return resp;
+  }
+
+  private async request(path: string, init: RequestInit = {}): Promise<Response> {
+    try {
+      return await this.doFetch(path, init, this.token);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && this.token) {
+        this.token = null;
+        this.role = null;
+        this.onUnauthorized?.(err.detail);
+      }
+      throw err;
+    }
   }
 
   private async requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
     const resp = await this.request(path, init);
     return (await resp.json()) as T;
+  }
+
+  private async platformAdminRequestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+    try {
+      const resp = await this.doFetch(path, init, this.platformAdminToken);
+      return (await resp.json()) as T;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401 && this.platformAdminToken) {
+        this.platformAdminToken = null;
+        this.platformAdminUsername = null;
+        this.onPlatformAdminUnauthorized?.(err.detail);
+      }
+      throw err;
+    }
   }
 
   private jsonInit(method: string, body: unknown): RequestInit {
@@ -89,8 +129,11 @@ export class ApiClient {
     }
   }
 
-  async login(username: string, password: string): Promise<string> {
-    const body = new URLSearchParams({ username, password });
+  async login(tenantCode: string, username: string, password: string): Promise<string> {
+    // client_id carries the tenant/shop code — usernames are unique per
+    // tenant, not globally, so the backend needs it to know which tenant's
+    // user table to check (see CLAUDE.md Section 11.9b).
+    const body = new URLSearchParams({ client_id: tenantCode, username, password });
     const resp = await this.request("/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -112,6 +155,17 @@ export class ApiClient {
   /** Exact barcode lookup — the scanner-gun fast path. */
   getBarcode(value: string): Promise<BarcodeScanResult> {
     return this.requestJson(`/barcodes/${encodeURIComponent(value)}`);
+  }
+
+  /** Admin catalog management — gated server-side by BARCODE_GENERATION
+   * (Essential+; see BarcodeAdmin.tsx and CLAUDE.md Stage 5/8). */
+  createBarcode(payload: {
+    product_id: string;
+    barcode_value: string;
+    pack_qty: number;
+    label: string;
+  }): Promise<Barcode> {
+    return this.requestJson("/barcodes", this.jsonInit("POST", payload));
   }
 
   createSale(payload: SaleCreatePayload): Promise<Sale> {
@@ -158,5 +212,153 @@ export class ApiClient {
 
   lowStockAlerts(): Promise<LowStockAlert[]> {
     return this.requestJson("/reports/low-stock-alerts");
+  }
+
+  getEntitlements(): Promise<TenantEntitlements> {
+    return this.requestJson("/tenant/me/entitlements");
+  }
+
+  getPlanComparison(): Promise<PlanComparison> {
+    return this.requestJson("/tenant/me/plan-comparison");
+  }
+
+  listUpgradeRequests(): Promise<UpgradeRequest[]> {
+    return this.requestJson("/tenant/me/upgrade-requests");
+  }
+
+  /** Records a request for Platform Admin to review — never changes the
+   * tenant's plan directly (CLAUDE.md Stage 10/13). */
+  requestUpgrade(requestedPlanCode: string, note?: string): Promise<UpgradeRequest> {
+    return this.requestJson(
+      "/tenant/me/upgrade-requests",
+      this.jsonInit("POST", { requested_plan_code: requestedPlanCode, note: note ?? null }),
+    );
+  }
+
+  // --- Platform Admin (CLAUDE.md Stage 11) — every method below uses
+  // `platformAdminToken`, never `token`, and vice versa for everything
+  // above. Never call these without first calling platformAdminLogin(). ---
+
+  async platformAdminLogin(username: string, password: string): Promise<void> {
+    const body = new URLSearchParams({ username, password });
+    const resp = await this.doFetch(
+      "/platform-admin/auth/login",
+      { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body.toString() },
+      null,
+    );
+    const data = (await resp.json()) as { access_token: string };
+    this.platformAdminToken = data.access_token;
+    this.platformAdminUsername = username;
+  }
+
+  platformAdminLogout(): void {
+    this.platformAdminToken = null;
+    this.platformAdminUsername = null;
+  }
+
+  getPlatformDashboard(): Promise<PlatformDashboardStats> {
+    return this.platformAdminRequestJson("/platform-admin/dashboard");
+  }
+
+  listPlatformTenants(): Promise<PlatformTenantListRow[]> {
+    return this.platformAdminRequestJson("/platform-admin/tenants");
+  }
+
+  getPlatformTenantDetail(tenantId: string): Promise<PlatformTenantDetail> {
+    return this.platformAdminRequestJson(`/platform-admin/tenants/${tenantId}`);
+  }
+
+  getPlatformTenantAuditLog(tenantId: string): Promise<PlatformAuditLogEntry[]> {
+    return this.platformAdminRequestJson(`/platform-admin/tenants/${tenantId}/audit-log`);
+  }
+
+  /** CLAUDE.md Stage 13's downgrade-impact check — call before
+   * `changeTenantPlan` so the operator can see what would actually change.
+   * Read-only, changes nothing. */
+  getPlanChangeImpact(tenantId: string, targetPlanCode: string): Promise<PlanChangeImpact> {
+    const params = new URLSearchParams({ target_plan_code: targetPlanCode });
+    return this.platformAdminRequestJson(`/platform-admin/tenants/${tenantId}/plan-change-impact?${params}`);
+  }
+
+  /** `confirm` must be true if `getPlanChangeImpact` came back non-empty —
+   * the backend refuses with 409 otherwise (never silently applies a
+   * plan reduction the operator hasn't explicitly acknowledged). */
+  changeTenantPlan(
+    tenantId: string,
+    planCode: string,
+    reason: string,
+    confirm = false,
+  ): Promise<PlatformTenantDetail> {
+    return this.platformAdminRequestJson(
+      `/platform-admin/tenants/${tenantId}/change-plan`,
+      this.jsonInit("POST", { plan_code: planCode, reason, confirm }),
+    );
+  }
+
+  overrideTenantFeature(
+    tenantId: string,
+    featureCode: string,
+    enabled: boolean,
+    reason: string,
+  ): Promise<PlatformTenantDetail> {
+    return this.platformAdminRequestJson(
+      `/platform-admin/tenants/${tenantId}/feature-overrides`,
+      this.jsonInit("POST", { feature_code: featureCode, enabled, reason }),
+    );
+  }
+
+  overrideTenantLimit(
+    tenantId: string,
+    limitCode: string,
+    overrideValue: number,
+    reason: string,
+  ): Promise<PlatformTenantDetail> {
+    return this.platformAdminRequestJson(
+      `/platform-admin/tenants/${tenantId}/limit-overrides`,
+      this.jsonInit("POST", { limit_code: limitCode, override_value: overrideValue, reason }),
+    );
+  }
+
+  suspendTenant(tenantId: string, reason: string): Promise<PlatformTenantDetail> {
+    return this.platformAdminRequestJson(
+      `/platform-admin/tenants/${tenantId}/suspend`,
+      this.jsonInit("POST", { reason }),
+    );
+  }
+
+  reactivateTenant(tenantId: string, reason: string): Promise<PlatformTenantDetail> {
+    return this.platformAdminRequestJson(
+      `/platform-admin/tenants/${tenantId}/reactivate`,
+      this.jsonInit("POST", { reason }),
+    );
+  }
+
+  extendTenantSubscription(tenantId: string, newRenewalDate: string, reason: string): Promise<PlatformTenantDetail> {
+    return this.platformAdminRequestJson(
+      `/platform-admin/tenants/${tenantId}/extend-subscription`,
+      this.jsonInit("POST", { new_renewal_date: newRenewalDate, reason }),
+    );
+  }
+
+  /** Cross-tenant upgrade-request inbox. Defaults to pending only. */
+  listPlatformUpgradeRequests(includeDecided = false): Promise<PlatformUpgradeRequestRow[]> {
+    const params = new URLSearchParams({ include_decided: String(includeDecided) });
+    return this.platformAdminRequestJson(`/platform-admin/upgrade-requests?${params}`);
+  }
+
+  /** Approving is just changeTenantPlan under the hood server-side — same
+   * downgrade-impact `confirm` gate applies. */
+  approveUpgradeRequest(requestId: string, reason: string, confirm = false): Promise<PlatformTenantDetail> {
+    return this.platformAdminRequestJson(
+      `/platform-admin/upgrade-requests/${requestId}/approve`,
+      this.jsonInit("POST", { reason, confirm }),
+    );
+  }
+
+  rejectUpgradeRequest(requestId: string, reason: string): Promise<PlatformUpgradeRequestRow> {
+    return this.platformAdminRequestJson(
+      `/platform-admin/upgrade-requests/${requestId}/reject`,
+      this.jsonInit("POST", { reason }),
+    );
   }
 }
