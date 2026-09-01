@@ -49,6 +49,7 @@ from app.schemas.platform_admin import (
     PlatformAdminTokenResponse,
     ReactivateRequest,
     RejectUpgradeRequestRequest,
+    RevokePlanRequest,
     SuspendRequest,
     TenantDetail,
     TenantListRow,
@@ -384,6 +385,17 @@ async def change_plan(
     tenant.active_plan_id = new_plan.id
     session.add(tenant)
 
+    # the recurring AMC is tied to the *current* plan and must track a plan
+    # change — `ensure_subscription` only sets it once, at first creation,
+    # so without this a tenant's displayed AMC stays frozen at whatever
+    # plan they started on forever (e.g. always showing Essential's
+    # ₹90,000 after upgrading to Enterprise). `setup_fee` is a one-time
+    # historical charge and deliberately left untouched.
+    current_subscription = get_current_subscription(session, tenant.id)
+    if current_subscription is not None:
+        current_subscription.annual_amc = new_plan.annual_amc
+        session.add(current_subscription)
+
     # close out any pending upgrade request that targeted this plan —
     # closes the loop from Stage 10's "Request Upgrade" without requiring
     # a separate approve-request action for the common case.
@@ -411,6 +423,41 @@ async def change_plan(
         tenant_id=tenant.id,
         old_value={"plan_code": old_plan.code if old_plan else None},
         new_value=new_value,
+        reason=payload.reason,
+    )
+    session.commit()
+    return await get_tenant_detail(tenant_id, session=session, _admin=admin)
+
+
+@router.post("/tenants/{tenant_id}/revoke-plan", response_model=TenantDetail)
+async def revoke_plan(
+    tenant_id: uuid.UUID,
+    payload: RevokePlanRequest,
+    session: Session = Depends(get_session),
+    admin: PlatformAdmin = Depends(get_current_platform_admin),
+) -> TenantDetail:
+    """Clears `Tenant.active_plan_id` entirely — distinct from `suspend`
+    (which blocks login outright). A revoked tenant can still log in, but
+    `can_use_feature`/`check_limit` fail closed for everything not covered
+    by a `TenantFeatureOverride`/`TenantLimitOverride` (see entitlements.py
+    and usage_limits.py's `NO_ACTIVE_PLAN` handling). No business data is
+    touched — the same "never delete, only restrict new access" principle
+    as a downgrade."""
+    tenant = _get_tenant_or_404(session, tenant_id)
+    old_plan = session.get(Plan, tenant.active_plan_id) if tenant.active_plan_id else None
+    if old_plan is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="tenant already has no active plan")
+
+    tenant.active_plan_id = None
+    session.add(tenant)
+
+    record_audit(
+        session,
+        platform_admin_id=admin.id,
+        action="REVOKE_PLAN",
+        tenant_id=tenant.id,
+        old_value={"plan_code": old_plan.code},
+        new_value={"plan_code": None},
         reason=payload.reason,
     )
     session.commit()

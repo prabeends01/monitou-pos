@@ -95,16 +95,40 @@ def _plan_limit_reached_error(plan_name: str, limit_code: str, limit_value: int,
     )
 
 
+def _no_active_plan_error() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "code": "NO_ACTIVE_PLAN",
+            "message": "This account has no active plan. Contact your account administrator.",
+        },
+    )
+
+
 def check_limit(session: Session, tenant_id: uuid.UUID, limit_code: str, increment: int = 1) -> None:
     """Raise the structured 409 above if creating `increment` more of
     `limit_code` would exceed the tenant's resolved limit. Call this BEFORE
     the create commits — it does not itself reserve capacity, that's
-    `increment_usage()`'s job once the create actually succeeds."""
+    `increment_usage()`'s job once the create actually succeeds.
+
+    A tenant with no active plan and no override for this limit (e.g. a
+    Platform Admin just revoked its plan) fails closed with a clean 403,
+    not the bare `ValueError` `_resolve_limit_value` raises for that case
+    elsewhere — this is the one place that condition is reachable from a
+    live request (most routers already block on `require_feature` first;
+    `POST /users` doesn't, since base user management isn't a gated
+    catalog feature — see CLAUDE.md Section 11.5)."""
     tenant = session.get(Tenant, tenant_id)
     if tenant is None:
         raise ValueError(f"tenant {tenant_id} does not exist")
 
-    limit_value = _resolve_limit_value(session, tenant, limit_code)
+    try:
+        limit_value = _resolve_limit_value(session, tenant, limit_code)
+    except ValueError:
+        if tenant.active_plan_id is None:
+            raise _no_active_plan_error() from None
+        raise  # a genuinely missing PlanLimit row is a deploy bug — keep failing loud
+
     current_value = get_usage(session, tenant_id, limit_code)
     if current_value + increment > limit_value:
         plan = session.get(Plan, tenant.active_plan_id) if tenant.active_plan_id else None

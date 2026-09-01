@@ -295,6 +295,16 @@ export class ApiClient {
     );
   }
 
+  /** Clears the tenant's plan entirely — distinct from suspend (which
+   * blocks login outright). The tenant can still log in, but loses every
+   * plan-gated feature (fails closed, same as any tenant with no plan). */
+  revokeTenantPlan(tenantId: string, reason: string): Promise<PlatformTenantDetail> {
+    return this.platformAdminRequestJson(
+      `/platform-admin/tenants/${tenantId}/revoke-plan`,
+      this.jsonInit("POST", { reason }),
+    );
+  }
+
   overrideTenantFeature(
     tenantId: string,
     featureCode: string,

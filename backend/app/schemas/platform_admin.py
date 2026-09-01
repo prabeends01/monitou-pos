@@ -105,6 +105,10 @@ class LimitOverrideRequest(BaseModel):
     reason: str
 
 
+class RevokePlanRequest(BaseModel):
+    reason: str
+
+
 class SuspendRequest(BaseModel):
     reason: str
 
