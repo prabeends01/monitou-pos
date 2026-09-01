@@ -17,6 +17,8 @@ import { useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { useAppServices } from "../AppContext";
+import FeatureGate from "../components/FeatureGate";
+import type { StockMoverEntry } from "../types";
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes, per CLAUDE.md Section 5.8
 const PERIODS = ["daily", "weekly", "monthly"] as const;
@@ -27,6 +29,32 @@ function StatCard({ title, value }: { title: string; value: string }) {
     <Card style={{ padding: 12, flex: 1 }}>
       <Caption1>{title}</Caption1>
       <Body1Strong style={{ fontSize: 20 }}>{value}</Body1Strong>
+    </Card>
+  );
+}
+
+function MoverTable({ title, entries }: { title: string; entries: StockMoverEntry[] }) {
+  return (
+    <Card style={{ padding: 12, flex: 1 }}>
+      <Body1Strong>{title}</Body1Strong>
+      <Table aria-label={title} size="small">
+        <TableHeader>
+          <TableRow>
+            <TableHeaderCell>SKU</TableHeaderCell>
+            <TableHeaderCell>Name</TableHeaderCell>
+            <TableHeaderCell>Sold (30d)</TableHeaderCell>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {entries.map((entry) => (
+            <TableRow key={entry.product_id}>
+              <TableCell>{entry.sku}</TableCell>
+              <TableCell>{entry.name}</TableCell>
+              <TableCell>{entry.qty_sold_30d}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     </Card>
   );
 }
@@ -99,6 +127,15 @@ export default function Dashboard() {
         <StatCard title="Stock value" value={stockStatsQuery.data?.total_stock_value ?? "—"} />
         <StatCard title="Out of stock" value={String(stockStatsQuery.data?.out_of_stock_count ?? "—")} />
         <StatCard title="Below threshold" value={String(stockStatsQuery.data?.below_threshold_count ?? "—")} />
+      </div>
+
+      <div style={{ display: "flex", gap: 12 }}>
+        <FeatureGate feature="FAST_MOVING_ANALYSIS">
+          <MoverTable title="Fastest moving" entries={stockStatsQuery.data?.fastest_moving ?? []} />
+        </FeatureGate>
+        <FeatureGate feature="SLOW_MOVING_ANALYSIS">
+          <MoverTable title="Slowest moving" entries={stockStatsQuery.data?.slowest_moving ?? []} />
+        </FeatureGate>
       </div>
 
       <Title2>Low stock — needs reordering</Title2>

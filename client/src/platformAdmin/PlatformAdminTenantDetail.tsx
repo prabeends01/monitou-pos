@@ -1,5 +1,6 @@
 import {
   Badge,
+  Body1,
   Body1Strong,
   Button,
   Caption1,
@@ -82,6 +83,16 @@ export default function PlatformAdminTenantDetail({ tenantId, onBack }: { tenant
       setPlanReason("");
       setPlanCode("");
       setPlanConfirmed(false);
+      invalidate();
+    },
+    onError: onErr,
+  });
+
+  const [revokeReason, setRevokeReason] = useState("");
+  const revokePlanMutation = useMutation({
+    mutationFn: () => api.revokeTenantPlan(tenantId, revokeReason),
+    onSuccess: () => {
+      setRevokeReason("");
       invalidate();
     },
     onError: onErr,
@@ -285,6 +296,23 @@ export default function PlatformAdminTenantDetail({ tenantId, onBack }: { tenant
             onClick={() => changePlanMutation.mutate()}
           >
             Change plan
+          </Button>
+        </ActionCard>
+
+        <ActionCard title="Revoke plan">
+          <Body1>
+            Clears the plan entirely — the tenant can still log in, but loses every plan-gated feature immediately.
+            No data is deleted. Not the same as suspending the account.
+          </Body1>
+          <Field label="Reason">
+            <Input value={revokeReason} onChange={(_, d) => setRevokeReason(d.value)} />
+          </Field>
+          <Button
+            appearance="primary"
+            disabled={!tenant.plan_code || !revokeReason || revokePlanMutation.isPending}
+            onClick={() => revokePlanMutation.mutate()}
+          >
+            {tenant.plan_code ? `Revoke ${tenant.plan_code}` : "No active plan"}
           </Button>
         </ActionCard>
 

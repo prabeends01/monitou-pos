@@ -3,10 +3,16 @@ import { useQuery } from "@tanstack/react-query";
 import { useAppServices } from "../AppContext";
 import type { FeatureInfo, LimitUsage, TenantEntitlements } from "../types";
 
-// Entitlements change on a plan/override change (a platform-admin action,
-// or an upgrade taking effect) — not on every render, so a long staleTime
-// is correct here, unlike Dashboard's REFRESH_INTERVAL_MS polling.
-const STALE_TIME_MS = 5 * 60 * 1000;
+// A platform admin can change this tenant's plan/overrides at any moment,
+// with no way to push that to an already-open session (no websocket) — so
+// this has to be short-poll, not the long staleTime an originally-planned
+// "only changes on a rare event" model would suggest. 15s means a plan
+// change (e.g. an approved upgrade request) takes effect in this tenant's
+// session within 15 seconds, without needing a re-login. Cheap at this
+// app's scale (a shop POS, not a high-traffic API) — same tradeoff
+// Dashboard.tsx already makes with its own REFRESH_INTERVAL_MS polling.
+const STALE_TIME_MS = 15 * 1000;
+const REFETCH_INTERVAL_MS = 15 * 1000;
 
 /** The one place the frontend fetches plan/feature/limit state. Every
  * screen goes through this (or useFeature/useLimit below) — never call
@@ -18,6 +24,8 @@ export function useEntitlements() {
     queryKey: ["entitlements"],
     queryFn: () => api.getEntitlements(),
     staleTime: STALE_TIME_MS,
+    refetchInterval: REFETCH_INTERVAL_MS,
+    refetchOnWindowFocus: true,
   });
 }
 
