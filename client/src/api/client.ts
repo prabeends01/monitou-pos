@@ -1,8 +1,11 @@
 import { fetch } from "@tauri-apps/plugin-http";
 
 import type {
+  AttendanceRecord,
   Barcode,
   BarcodeScanResult,
+  CurrentStockRow,
+  LeaveRequest,
   LowStockAlert,
   PlanChangeImpact,
   PlanComparison,
@@ -15,8 +18,10 @@ import type {
   Sale,
   SaleCreatePayload,
   SalesSummaryBucket,
+  StaffUser,
   StockMovementResult,
   StockStats,
+  TaDaClaim,
   TenantEntitlements,
   UpgradeRequest,
 } from "../types";
@@ -199,6 +204,52 @@ export class ApiClient {
 
   stockBalance(productId: string): Promise<{ product_id: string; balance: number }> {
     return this.requestJson(`/stock/balance/${productId}`);
+  }
+
+  getCurrentStock(): Promise<CurrentStockRow[]> {
+    return this.requestJson("/stock/current");
+  }
+
+  getUsers(): Promise<StaffUser[]> {
+    return this.requestJson("/users");
+  }
+
+  listAttendance(workDate: string): Promise<AttendanceRecord[]> {
+    const params = new URLSearchParams({ work_date: workDate });
+    return this.requestJson(`/hr/attendance?${params.toString()}`);
+  }
+
+  markAttendance(payload: Record<string, unknown>): Promise<AttendanceRecord> {
+    return this.requestJson("/hr/attendance", this.jsonInit("POST", payload));
+  }
+
+  listLeaveRequests(): Promise<LeaveRequest[]> {
+    return this.requestJson("/hr/leave");
+  }
+
+  createLeaveRequest(payload: Record<string, unknown>): Promise<LeaveRequest> {
+    return this.requestJson("/hr/leave", this.jsonInit("POST", payload));
+  }
+
+  decideLeaveRequest(id: string, decision: "approve" | "reject"): Promise<LeaveRequest> {
+    return this.requestJson(`/hr/leave/${id}/${decision}`, this.jsonInit("POST", {}));
+  }
+
+  listTaDaClaims(): Promise<TaDaClaim[]> {
+    return this.requestJson("/hr/ta-da");
+  }
+
+  createTaDaClaim(payload: Record<string, unknown>): Promise<TaDaClaim> {
+    return this.requestJson("/hr/ta-da", this.jsonInit("POST", payload));
+  }
+
+  decideTaDaClaim(id: string, decision: "approve" | "reject", amountApproved?: string): Promise<TaDaClaim> {
+    const payload = decision === "approve" && amountApproved ? { amount_approved: amountApproved } : {};
+    return this.requestJson(`/hr/ta-da/${id}/${decision}`, this.jsonInit("POST", payload));
+  }
+
+  markTaDaClaimPaid(id: string): Promise<TaDaClaim> {
+    return this.requestJson(`/hr/ta-da/${id}/mark-paid`, this.jsonInit("POST", {}));
   }
 
   salesSummary(period: string, from: string, to: string): Promise<SalesSummaryBucket[]> {

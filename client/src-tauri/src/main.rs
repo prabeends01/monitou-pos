@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    monitou_pos_client_lib::run()
+    manitou_pos_client_lib::run()
 }

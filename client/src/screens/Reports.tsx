@@ -11,7 +11,7 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { ApiError } from "../api/client";
 import { useAppServices } from "../AppContext";
@@ -23,6 +23,14 @@ export default function Reports() {
   const salesQuery = useQuery({ queryKey: ["sales"], queryFn: () => api.listSales() });
   const [error, setError] = useState<string | null>(null);
   const [busySaleId, setBusySaleId] = useState<string | null>(null);
+
+  const sales = useMemo(
+    () =>
+      [...(salesQuery.data ?? [])].sort(
+        (a, b) => new Date(b.created_at_client).getTime() - new Date(a.created_at_client).getTime(),
+      ),
+    [salesQuery.data],
+  );
 
   async function handleReprint(saleId: string, invoiceNumber: string) {
     setError(null);
@@ -47,19 +55,19 @@ export default function Reports() {
         <TableHeader>
           <TableRow>
             <TableHeaderCell>Invoice</TableHeaderCell>
-            <TableHeaderCell>Date</TableHeaderCell>
-            <TableHeaderCell>Total</TableHeaderCell>
             <TableHeaderCell>Payment</TableHeaderCell>
+            <TableHeaderCell>Total</TableHeaderCell>
+            <TableHeaderCell>Date</TableHeaderCell>
             <TableHeaderCell></TableHeaderCell>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {(salesQuery.data ?? []).map((sale) => (
+          {sales.map((sale) => (
             <TableRow key={sale.id}>
               <TableCell>{sale.invoice_number}</TableCell>
-              <TableCell>{sale.created_at_client}</TableCell>
-              <TableCell>{sale.total_amount}</TableCell>
               <TableCell>{sale.payment_mode}</TableCell>
+              <TableCell>{sale.total_amount}</TableCell>
+              <TableCell>{sale.created_at_client}</TableCell>
               <TableCell>
                 <Button
                   size="small"

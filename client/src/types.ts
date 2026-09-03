@@ -300,3 +300,71 @@ export interface StockMovementResult {
   balance_after: number;
   went_negative: boolean;
 }
+
+export interface CurrentStockRow {
+  product_id: string;
+  sku: string;
+  name: string;
+  category: string;
+  base_unit: string;
+  balance: number;
+  reorder_threshold: number;
+}
+
+export interface StaffUser {
+  id: string;
+  username: string;
+  role: "admin" | "sales";
+  is_active: boolean;
+}
+
+export type AttendanceStatus = "present" | "absent" | "half_day" | "on_leave";
+
+export interface AttendanceRecord {
+  id: string;
+  user_id: string;
+  work_date: string;
+  status: AttendanceStatus;
+  check_in_at: string | null;
+  check_out_at: string | null;
+  marked_by: string;
+  notes: string | null;
+  updated_at: string;
+}
+
+export type LeaveType = "casual" | "sick" | "earned" | "unpaid";
+export type LeaveStatus = "pending" | "approved" | "rejected" | "cancelled";
+
+export interface LeaveRequest {
+  id: string;
+  user_id: string;
+  leave_type: LeaveType;
+  start_date: string;
+  end_date: string;
+  days_count: string;
+  reason: string;
+  status: LeaveStatus;
+  requested_by: string;
+  requested_at: string;
+  decided_by: string | null;
+  decided_at: string | null;
+}
+
+export type TaDaStatus = "pending" | "approved" | "rejected" | "paid";
+
+export interface TaDaClaim {
+  id: string;
+  user_id: string;
+  claim_date: string;
+  purpose: string;
+  from_location: string | null;
+  to_location: string | null;
+  travel_mode: string | null;
+  amount_claimed: string;
+  amount_approved: string | null;
+  status: TaDaStatus;
+  requested_by: string;
+  requested_at: string;
+  decided_by: string | null;
+  decided_at: string | null;
+}

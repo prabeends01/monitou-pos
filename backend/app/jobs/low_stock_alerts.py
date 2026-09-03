@@ -7,7 +7,7 @@ from app.db import engine
 from app.models.tenant import Tenant, TenantStatus
 from app.services.reports import low_stock_products
 
-logger = logging.getLogger("monitou.low_stock_alerts")
+logger = logging.getLogger("manitou.low_stock_alerts")
 
 
 def send_low_stock_digest() -> None:

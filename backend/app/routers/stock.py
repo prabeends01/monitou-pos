@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.auth.deps import get_current_user, require_role
 from app.db import get_session
@@ -9,13 +9,14 @@ from app.models.product import Product
 from app.models.stock_movement import MovementType
 from app.models.user import User, UserRole
 from app.schemas.stock import (
+    CurrentStockRow,
     PurchaseReceiveCreate,
     StockAdjustmentCreate,
     StockBalance,
     StockMovementResult,
 )
 from app.services.entitlements import require_feature
-from app.services.stock_ledger import get_balance, record_movement
+from app.services.stock_ledger import get_all_balances, get_balance, record_movement
 from app.tenancy import get_tenant_owned
 
 router = APIRouter(prefix="/stock", tags=["stock"])
@@ -81,6 +82,30 @@ async def receive_purchase(
         balance_after=get_balance(session, admin.tenant_id, movement.product_id),
         went_negative=went_negative,
     )
+
+
+@router.get("/current", response_model=list[CurrentStockRow])
+async def read_current_stock(
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+    _feature: None = Depends(require_feature("STOCK_LEDGER")),
+) -> list[CurrentStockRow]:
+    products = session.exec(
+        select(Product).where(Product.tenant_id == user.tenant_id, Product.is_active).order_by(Product.name)
+    ).all()
+    balances = get_all_balances(session, user.tenant_id)
+    return [
+        CurrentStockRow(
+            product_id=p.id,
+            sku=p.sku,
+            name=p.name,
+            category=p.category,
+            base_unit=p.base_unit,
+            balance=balances.get(p.id, 0),
+            reorder_threshold=p.reorder_threshold,
+        )
+        for p in products
+    ]
 
 
 @router.get("/balance/{product_id}", response_model=StockBalance)

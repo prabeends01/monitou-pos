@@ -9,6 +9,20 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
+# WeasyPrint (GST invoice PDFs) links against Pango/Cairo/GLib at runtime —
+# python:3.12-slim has none of them, so without this every invoice PDF
+# request fails with "OSError: cannot load library 'libgobject-2.0-0'".
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libpangocairo-1.0-0 \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    libglib2.0-0 \
+    shared-mime-info \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 # Dependencies first, in their own cached layer — only reruns when
 # pyproject.toml/uv.lock change, not on every source edit.
 COPY backend/pyproject.toml backend/uv.lock ./

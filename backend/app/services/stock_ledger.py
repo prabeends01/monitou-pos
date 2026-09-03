@@ -16,6 +16,17 @@ def get_balance(session: Session, tenant_id: uuid.UUID, product_id: uuid.UUID) -
     return total or 0
 
 
+def get_all_balances(session: Session, tenant_id: uuid.UUID) -> dict[uuid.UUID, int]:
+    """Balance per product for the whole tenant in one grouped query, for the
+    Current Stock view — avoids an N+1 of `get_balance` per product."""
+    rows = session.exec(
+        select(StockMovement.product_id, func.sum(StockMovement.qty_base_units))
+        .where(StockMovement.tenant_id == tenant_id)
+        .group_by(StockMovement.product_id)
+    ).all()
+    return {product_id: total or 0 for product_id, total in rows}
+
+
 def record_movement(
     session: Session,
     *,

@@ -52,7 +52,7 @@ fn print_receipt_inner(host: &str, port: u16, receipt: &ReceiptPayload) -> escpo
 
     printer
         .init()?
-        .writeln("Monitou Spare Parts")?
+        .writeln("Manitou Spare Parts")?
         .writeln(&format!("Invoice: {}", receipt.invoice_number))?
         .writeln(&format!("Date: {}", receipt.created_at_client))?
         .writeln("--------------------------------")?;

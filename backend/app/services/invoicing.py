@@ -16,7 +16,7 @@ _INVOICE_TEMPLATE = """
 </style>
 </head>
 <body>
-  <h1>Monitou Spare Parts — Tax Invoice</h1>
+  <h1>Manitou Spare Parts — Tax Invoice</h1>
   <p>Invoice No: <b>{invoice_number}</b> ({invoice_series})<br/>
      Date: {created_at_client}<br/>
      Customer: {customer_name}<br/>

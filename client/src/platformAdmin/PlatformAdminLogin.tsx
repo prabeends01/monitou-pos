@@ -76,7 +76,7 @@ export default function PlatformAdminLogin({ onBack }: { onBack: () => void }) {
   return (
     <div className={styles.root}>
       <form className={styles.card} onSubmit={handleSubmit}>
-        <div className={styles.wordmark}>Monitou · Platform Admin</div>
+        <div className={styles.wordmark}>Manitou · Platform Admin</div>
         <MessageBar intent="warning">
           <MessageBarBody>Internal use only. This is a separate account from any shop's login.</MessageBarBody>
         </MessageBar>
