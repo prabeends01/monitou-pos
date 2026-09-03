@@ -30,3 +30,13 @@ class StockMovementResult(BaseModel):
 class StockBalance(BaseModel):
     product_id: uuid.UUID
     balance: int
+
+
+class CurrentStockRow(BaseModel):
+    product_id: uuid.UUID
+    sku: str
+    name: str
+    category: str
+    base_unit: str
+    balance: int
+    reorder_threshold: int

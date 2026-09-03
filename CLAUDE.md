@@ -1,4 +1,4 @@
-# CLAUDE.md — Monitou Spare Parts POS & Inventory System
+# CLAUDE.md — Manitou Spare Parts POS & Inventory System
 
 This file is the source of truth for architecture, conventions, and build order.
 Read it fully before writing code. Follow the phase order in Section 8 — do not
@@ -9,7 +9,7 @@ skip ahead to later phases before earlier ones are working and tested.
 ## 1. Project overview
 
 A retail POS + inventory management system for a shop selling spare parts for
-Monitou handling, lifting, and earthmoving equipment.
+Manitou handling, lifting, and earthmoving equipment.
 
 - **Roles:** `admin` (full access — catalog, stock, users, reports, costs) and
   `sales` (search/scan parts, create sales, print invoices, view own sales
@@ -209,7 +209,7 @@ monitou-pos/
 | sku | str, unique | |
 | name | str | |
 | category | str | e.g. fasteners, hydraulics, filters |
-| compatible_models | str/array | which Monitou machine models this fits |
+| compatible_models | str/array | which Manitou machine models this fits |
 | base_unit | str | always the smallest sellable unit, e.g. "piece" |
 | cost_price | decimal | admin-only visibility |
 | sale_price | decimal | |
@@ -923,3 +923,210 @@ reactivate tenant, extend subscription) each write a `platform_audit_log`
 row: who, when, action, tenant_id, old_value, new_value, reason. Design
 this table in Stage 11, not Stage 1, since it has no bearing on tenant-side
 schema.
+
+## 12. HR/CRM module: Attendance, Leave & TA/DA — **Built (see 12.7)**
+
+Originally written as a design-only plan before any code existed; all six
+stages in 12.7 are now done. Left in place (rather than trimmed to just the
+"what exists" summary) since it still documents the *why* behind decisions
+like the fixed leave-type enum, the upsert-not-append attendance model, and
+the no-self-service scope call — useful context a future session extending
+this module shouldn't have to re-derive.
+
+### 12.1 Scope
+
+Three capabilities, requested as a set, reachable **only from the admin
+side of the app** — no self-service portal for the `sales` role in this
+phase:
+
+1. **Attendance** — admin marks/reviews daily attendance for every staff
+   account in the tenant.
+2. **Leave** — admin logs and decides leave requests for staff.
+3. **TA/DA** — admin logs and decides Travel Allowance / Dearness Allowance
+   reimbursement claims for staff.
+
+"Admin-only" is enforced the same two-layer way every other admin screen in
+this app already is (Section 4's design principle, made literal in
+`App.tsx`'s `NAV_ITEMS`): `adminOnly: true` (RBAC layer, `role === "admin"`)
+**and** a `requiredFeature` gate (plan-entitlement layer). Both layers, not
+one — a `sales` JWT must never reach these endpoints even if a tenant's plan
+has the feature enabled, and an `admin` on a plan without the feature must
+never see the tab.
+
+**No new identity table.** "Employees" are the existing `users` rows
+(`role` = admin or sales) — this app has no separate HR/employee roster
+today, and inventing one just to attach attendance/leave/TA-DA to it would
+duplicate `users` for no reason. Every new table's `user_id` FKs straight to
+`users.id`.
+
+### 12.2 Data model (new tables)
+
+All three follow the existing convention (Section 11.2): every table gets
+its own `tenant_id` column for RLS, even though it's also reachable
+transitively through `user_id` — same reasoning as `stock_movements`,
+`sale_items`, etc.
+
+#### `attendance_records`
+| column | type | notes |
+|---|---|---|
+| id | uuid PK | |
+| tenant_id | uuid FK tenants, indexed | |
+| user_id | uuid FK users, indexed | the staff member |
+| work_date | date | `UNIQUE(tenant_id, user_id, work_date)` — one row per person per day |
+| status | enum(present, absent, half_day, on_leave) | |
+| check_in_at | timestamp, nullable | optional, admin may only record status without times |
+| check_out_at | timestamp, nullable | |
+| marked_by | uuid FK users | which admin recorded/edited this row |
+| notes | str, nullable | |
+| created_at / updated_at | timestamp | |
+
+#### `leave_requests`
+| column | type | notes |
+|---|---|---|
+| id | uuid PK | |
+| tenant_id | uuid FK tenants, indexed | |
+| user_id | uuid FK users, indexed | who the leave is for |
+| leave_type | enum(casual, sick, earned, unpaid) | fixed enum for v1 — no per-tenant configurable leave-type table, see 12.6 |
+| start_date / end_date | date | inclusive range |
+| days_count | numeric | computed at creation from the date range (half-day not modeled in v1) |
+| reason | str | |
+| status | enum(pending, approved, rejected, cancelled) | |
+| requested_by | uuid FK users | admin who logged it (no self-service, so always an admin in v1) |
+| requested_at | timestamp | |
+| decided_by | uuid FK users, nullable | |
+| decided_at | timestamp, nullable | |
+
+#### `ta_da_claims`
+| column | type | notes |
+|---|---|---|
+| id | uuid PK | |
+| tenant_id | uuid FK tenants, indexed | |
+| user_id | uuid FK users, indexed | who the claim is for |
+| claim_date | date | date of travel/expense |
+| purpose | str | |
+| from_location / to_location | str, nullable | |
+| travel_mode | str, nullable | e.g. bus, train, own vehicle |
+| amount_claimed | decimal(12,2) | |
+| amount_approved | decimal(12,2), nullable | may differ from claimed on partial approval |
+| status | enum(pending, approved, rejected, paid) | `paid` is a separate terminal state from `approved` — approval and disbursement are different events |
+| requested_by | uuid FK users | |
+| requested_at | timestamp | |
+| decided_by | uuid FK users, nullable | |
+| decided_at | timestamp, nullable | |
+
+No new `platform_audit_log` entries — that ledger is exclusively for
+Platform Admin actions (Section 11.13). Tenant-internal HR actions are
+covered by `marked_by`/`requested_by`/`decided_by`/`decided_at` on the rows
+themselves, the same level of traceability `upgrade_requests` already uses.
+
+### 12.3 Feature catalog additions
+
+New `hr` module, three feature codes, added to `plan_catalog.py`'s
+`FEATURES` list (not a schema change — same seed-driven mechanism as every
+existing feature):
+
+| code | name | proposed default plan |
+|---|---|---|
+| `ATTENDANCE_TRACKING` | Attendance Tracking | Enterprise only |
+| `LEAVE_MANAGEMENT` | Leave Management | Enterprise only |
+| `TA_DA_CLAIMS` | TA/DA Claims | Enterprise only |
+
+Proposed as an Enterprise-only bundle (a premium HR add-on) rather than
+spread across tiers, consistent with how this app already gates its most
+operationally heavy capabilities (multi-level approval, advanced audit) to
+Enterprise. `TenantFeatureOverride` still lets Platform Admin sell any one
+of the three à la carte to a Basic/Essential tenant without a plan change —
+same mechanism every other feature already uses. **This tier placement is a
+proposal, not a decision — confirm before Stage 1** (see 12.6).
+
+No new `PlanLimit` — v1 has no cap on attendance rows/leave requests/claims
+per tenant (nothing else in this app limits by record count except the
+four existing `MAX_*` limits, and there's no commercial reason yet to add
+one here).
+
+### 12.4 Backend
+
+- `app/models/hr.py` — `AttendanceRecord`, `LeaveRequest`, `TaDaClaim`,
+  plus their status enums.
+- `app/services/hr.py` — status-transition rules (e.g. reject a leave
+  request already `approved`/`rejected`/`cancelled`; `days_count`
+  computation; a claim's `amount_approved` defaults to `amount_claimed` on
+  approval unless overridden).
+- `app/routers/hr.py` — one router, three resource groups under `/hr`:
+  - `POST/GET/PATCH /hr/attendance` (mark/list/edit a day's record)
+  - `POST/GET /hr/leave`, `POST /hr/leave/{id}/approve`, `.../reject`
+  - `POST/GET /hr/ta-da`, `POST /hr/ta-da/{id}/approve`, `.../reject`
+  Every route: `require_role(UserRole.admin)` **and**
+  `require_feature("ATTENDANCE_TRACKING" | "LEAVE_MANAGEMENT" |
+  "TA_DA_CLAIMS")` depending on the resource group.
+- `app/schemas/hr.py` — request/response Pydantic models per resource.
+- Migration adds the three tables + the `hr` feature rows via
+  `seed_plans`'s existing idempotent sync (no new seed script needed).
+
+### 12.5 Frontend
+
+- New nav item in `App.tsx`'s `NAV_ITEMS`: `{ key: "hr", label: "HR",
+  adminOnly: true, requiredFeature: "ATTENDANCE_TRACKING", render: () =>
+  <HrAdmin /> }` — gated on the first of the three codes so the tab
+  disappears entirely for a plan with none of them; the screen itself
+  gates its three sub-tabs individually so a tenant with only e.g.
+  `LEAVE_MANAGEMENT` overridden on sees just that one sub-tab, not all
+  three.
+- `screens/HrAdmin.tsx` — `TabList` with three sub-tabs (same pattern as
+  the redesigned `StockAdmin.tsx`):
+  - **Attendance**: date picker + one row per staff account, quick
+    present/absent/half-day/leave buttons, saves via `PATCH
+    /hr/attendance`.
+  - **Leave**: table of requests (newest first, same sort convention as
+    `Reports.tsx`'s sales history), "Log leave" button opens a form
+    (staff, type, date range, reason), Approve/Reject actions per pending
+    row.
+  - **TA/DA**: table of claims, "Log claim" button, Approve/Reject (with
+    an editable approved-amount field), separate "Mark paid" action once
+    approved.
+- `api/client.ts` — `listAttendance`, `markAttendance`, `listLeaveRequests`,
+  `createLeaveRequest`, `decideLeaveRequest`, `listTaDaClaims`,
+  `createTaDaClaim`, `decideTaDaClaim`.
+- `types.ts` — matching interfaces for the three resources.
+
+### 12.6 Open decisions — resolved by proceeding with the proposal as-is
+
+User said "start the development" without amending any of the below, so
+all five were built exactly as proposed. Recorded here so a later session
+knows these were accepted defaults, not oversights:
+
+- **Plan tier placement** (12.3) — shipped Enterprise-only, not
+  confirmed as a business decision beyond "reasonable default." Could
+  instead be its own paid add-on independent of tier,
+  sold purely via `TenantFeatureOverride` with all three defaulted off
+  everywhere.
+- **Leave types are a fixed enum** (`casual`/`sick`/`earned`/`unpaid`) in
+  v1, not a per-tenant configurable table — matches this app's general
+  "no premature configurability" stance (Section 7), but means adding a
+  new leave type later is a code change, not an admin action.
+- **No leave-balance/accrual tracking in v1** — a leave request can be
+  logged and approved with no check against an annual entitlement. If
+  balance tracking is wanted, that's a `leave_balances` table (per
+  `user_id` + `leave_type` + year) as a follow-up phase, not v1.
+- **No employee self-service** — `sales`-role staff cannot check
+  themselves in, request their own leave, or file their own TA/DA claim;
+  admin does all data entry on their behalf. If self-service is wanted
+  later, it's a second RBAC path onto the same tables (`sales` allowed to
+  `POST` their own row, `admin` keeps approve/reject) — not a v1 scope
+  item per the "admin page only" instruction this plan was built against.
+- **Half-day granularity** — `attendance_records.status` supports
+  `half_day` but `leave_requests.days_count` doesn't split a half-day
+  within a range; if half-day leave matters, `days_count` needs to become
+  a decimal computed from a more detailed per-day breakdown, not a simple
+  date-range subtraction.
+
+### 12.7 Staged build order
+
+| Stage | Scope | Status |
+|---|---|---|
+| HR-1 | `hr` feature codes in `plan_catalog.py` + `AttendanceRecord`/`LeaveRequest`/`TaDaClaim` models + migration, no endpoints yet | **Done** — migration `453c584202a9` (3 tables + RLS `tenant_isolation` policy on all three, same pattern as `9196eb11b8d2`, not deferred like the Platform-Admin-cross-tenant tables). `seed_plans` now syncs 83 features (was 80). |
+| HR-2 | `services/hr.py` + `routers/hr.py` (attendance) + tests | **Done, folded into one pass with HR-3/HR-4** — `mark_attendance` is an upsert keyed on `(tenant_id, user_id, work_date)` (re-marking a day edits the row, doesn't 409/duplicate — admin correcting a mistake is the normal case). `POST/GET /hr/attendance`, `require_role(admin)` + `require_feature("ATTENDANCE_TRACKING")`. |
+| HR-3 | `services/hr.py` (leave) + router endpoints + tests | **Done** — `create_leave_request` computes `days_count` from the date range (422 if `end_date < start_date`); `decide_leave_request` only transitions out of `pending` (409 `"leave request already {status}"` on a second decide — same guard shape as `UpgradeRequest`). `POST/GET /hr/leave`, `.../{id}/approve`, `.../reject`. |
+| HR-4 | `services/hr.py` (TA/DA) + router endpoints + tests | **Done** — `amount_approved` defaults to `amount_claimed` on approve unless overridden (partial-approval case); `paid` is a separate transition only reachable from `approved` (409 otherwise), matching 12.2's "approval and disbursement are different events." `POST/GET /hr/ta-da`, `.../approve`, `.../reject`, `.../mark-paid`. |
+| HR-5 | `screens/HrAdmin.tsx` (all three sub-tabs) + `api/client.ts`/`types.ts` wiring + nav entry | **Done** — `TabList` with Attendance/Leave/TA-DA, same pattern as the redesigned `StockAdmin.tsx`; each sub-tab wrapped in its own `<FeatureGate feature="...">` so a tenant with only one of the three overridden on sees just that one. Staff picker reads `GET /users` (`api.getUsers()` — this was the first frontend consumer of that endpoint; no user-management screen existed before this stage, so no prior code to conflict with). Attendance is a per-day grid (one row per staff account, quick-mark buttons); Leave and TA/DA are tables + a log-new-entry form + Approve/Reject (and Mark-paid for TA/DA) per pending row. |
+| HR-6 | README/CLAUDE.md status update, security-review pass | **Done** — this table. Security pass done by hand rather than the `security-review` skill's sub-agent flow (small, same-pattern diff, no new risk surface): tenant ownership of `user_id` is checked (`_require_tenant_user` → `get_tenant_owned`) before every create, exactly like every other create-flow; `decide_leave_request`/`decide_ta_da_claim` look up by id then check `tenant_id` match before allowing a decision (no IDOR — a request/claim id from another tenant 404s, doesn't leak or let itself be approved); RLS + `require_role` + `require_feature` present on every route; `amount_claimed` validated positive. 9 new backend tests (`tests/test_hr.py`), 133/134 backend total (1 pre-existing unrelated WeasyPrint gap). `tsc --noEmit` clean, 13/13 client tests (Fluent/Vitest render-testing still blocked repo-wide per Section 11.1/11.11 — `HrAdmin.tsx` is logic-only verified + typechecked, same as every other screen since Stage 8). Live browser verification blocked by the same Tauri-IPC limitation noted since Stage 8 — not attempted here either. |

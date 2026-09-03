@@ -1,4 +1,4 @@
-# Monitou POS
+# Manitou POS
 
 A retail point-of-sale and inventory management system for a shop selling
 spare parts for handling, lifting, and earthmoving equipment.
@@ -313,7 +313,7 @@ npm run tauri build
 The first build compiles the full Rust toolchain and can take several
 minutes. The installer lands at:
 ```
-client\src-tauri\target\release\bundle\msi\Monitou POS_0.1.0_x64_en-US.msi
+client\src-tauri\target\release\bundle\msi\Manitou POS_0.1.0_x64_en-US.msi
 ```
 (or an NSIS `.exe` under `bundle\nsis\`, depending on the configured
 bundle targets)
@@ -321,7 +321,7 @@ bundle targets)
 **Install and run**
 - Double-click the `.msi` and click through the installer like any other
   Windows application
-- Launch **"Monitou POS"** from the Start Menu
+- Launch **"Manitou POS"** from the Start Menu
 - Log in with shop code `MONITOU-001` and `admin1`/`adminpass` or
   `sales1`/`salespass` (from the seed step above), or a real account
   created via the admin Products/Users flow. The shop code identifies the

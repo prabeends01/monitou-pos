@@ -87,7 +87,7 @@ export default function Login({ onPlatformAdminLogin }: { onPlatformAdminLogin?:
   // login — this identifies the tenant, it's not a secret, so plain
   // localStorage is fine (unlike the JWT, which goes through plugin-store).
   const [tenantCode, setTenantCode] = useState(
-    () => localStorage.getItem("monitou_tenant_code") ?? ""
+    () => localStorage.getItem("manitou_tenant_code") ?? ""
   );
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -104,7 +104,7 @@ export default function Login({ onPlatformAdminLogin }: { onPlatformAdminLogin?:
     setError(null);
     try {
       const role = await api.login(tenantCode, username, password);
-      localStorage.setItem("monitou_tenant_code", tenantCode);
+      localStorage.setItem("manitou_tenant_code", tenantCode);
       if (api.token) {
         // Persisting the session (so the cashier isn't asked to log in
         // again next launch) is a convenience, not a login requirement —
@@ -134,7 +134,7 @@ export default function Login({ onPlatformAdminLogin }: { onPlatformAdminLogin?:
       <form className={styles.card} onSubmit={handleSubmit}>
         <div className={styles.brandRow}>
           <div className={styles.wordmark}>
-            MONI<span className={styles.wordmarkAccent}>TOU</span>
+            MANI<span className={styles.wordmarkAccent}>TOU</span>
           </div>
           <div className={styles.tagline}>Spare Parts · POS &amp; Inventory</div>
         </div>

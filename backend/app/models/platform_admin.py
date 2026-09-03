@@ -5,7 +5,7 @@ from sqlmodel import Field, SQLModel
 
 
 class PlatformAdmin(SQLModel, table=True):
-    """An internal Monitou platform operator — entirely separate from
+    """An internal Manitou platform operator — entirely separate from
     tenant `users` (CLAUDE.md Section 11.13/11.9.6). Never reuse
     `UserRole.admin` for this: a tenant-side privilege-escalation bug must
     not be able to reach platform-admin actions, which is only true if

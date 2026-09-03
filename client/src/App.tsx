@@ -5,6 +5,7 @@ import { AppServicesProvider, useAppServices } from "./AppContext";
 import FeatureGate from "./components/FeatureGate";
 import BarcodeAdmin from "./screens/BarcodeAdmin";
 import Dashboard from "./screens/Dashboard";
+import HrAdmin from "./screens/HrAdmin";
 import Login from "./screens/Login";
 import PlanSubscription from "./screens/PlanSubscription";
 import PosBilling from "./screens/PosBilling";
@@ -17,7 +18,7 @@ import { usePlatformAdminStore } from "./stores/platformAdminStore";
 import { useSessionStore } from "./stores/sessionStore";
 import type { Role } from "./types";
 
-type TabKey = "pos" | "reports" | "dashboard" | "products" | "stock" | "barcodes" | "settings";
+type TabKey = "pos" | "reports" | "dashboard" | "products" | "stock" | "barcodes" | "hr" | "settings";
 
 interface NavItem {
   key: TabKey;
@@ -68,6 +69,13 @@ const NAV_ITEMS: NavItem[] = [
     requiredFeature: "BARCODE_GENERATION",
     adminOnly: true,
     render: () => <BarcodeAdmin />,
+  },
+  {
+    key: "hr",
+    label: "HR",
+    requiredFeature: "ATTENDANCE_TRACKING",
+    adminOnly: true,
+    render: () => <HrAdmin />,
   },
   {
     key: "settings",
@@ -139,7 +147,7 @@ function MainApp() {
       <div className={styles.header}>
         <div className={styles.headerLeft}>
           <div className={styles.wordmark}>
-            MONI<span className={styles.wordmarkAccent}>TOU</span>
+            MANI<span className={styles.wordmarkAccent}>TOU</span>
           </div>
           <TabList selectedValue={tab} onTabSelect={(_, data) => setTab(data.value as TabKey)}>
             {rbacVisible.map((item) =>

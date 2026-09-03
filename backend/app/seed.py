@@ -81,7 +81,7 @@ def _get_or_create_tenant(session: Session) -> Tenant:
     if tenant is None:
         tenant = Tenant(
             tenant_code=TENANT_CODE,
-            company_name="Monitou Spare Parts",
+            company_name="Manitou Spare Parts",
             active_plan_id=essential.id if essential else None,
         )
         session.add(tenant)

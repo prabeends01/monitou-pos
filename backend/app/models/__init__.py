@@ -1,6 +1,15 @@
 from app.models.barcode import Barcode
 from app.models.customer import Customer
 from app.models.entitlement import TenantFeatureOverride, TenantLimitOverride, UsageCounter
+from app.models.hr import (
+    AttendanceRecord,
+    AttendanceStatus,
+    LeaveRequest,
+    LeaveStatus,
+    LeaveType,
+    TaDaClaim,
+    TaDaStatus,
+)
 from app.models.plan import (
     Feature,
     FeatureStatus,
@@ -22,11 +31,16 @@ from app.models.upgrade_request import UpgradeRequest, UpgradeRequestStatus
 from app.models.user import User, UserRole
 
 __all__ = [
+    "AttendanceRecord",
+    "AttendanceStatus",
     "Barcode",
     "Customer",
     "Feature",
     "FeatureStatus",
     "FeatureType",
+    "LeaveRequest",
+    "LeaveStatus",
+    "LeaveType",
     "Plan",
     "PlanFeature",
     "PlanLimit",
@@ -44,6 +58,8 @@ __all__ = [
     "Subscription",
     "SubscriptionStatus",
     "Supplier",
+    "TaDaClaim",
+    "TaDaStatus",
     "Tenant",
     "TenantFeatureOverride",
     "TenantLimitOverride",

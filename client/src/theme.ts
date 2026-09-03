@@ -5,7 +5,7 @@ import type { BrandVariants, Theme } from "@fluentui/react-components";
  * equipment/industrial brands use (Manitou's own site included). 10 darkest
  * to 160 lightest, per Fluent UI's BrandVariants convention. Generated via
  * HSL sweep, not hand-picked, so the steps stay perceptually even. */
-export const monitouBrand: BrandVariants = {
+export const manitouBrand: BrandVariants = {
   10: "#2b0809",
   20: "#470b0e",
   30: "#5f0c10",
@@ -26,4 +26,4 @@ export const monitouBrand: BrandVariants = {
 
 /** Clean white/red light theme — red accent on white/light-gray surfaces,
  * dark text. */
-export const monitouTheme: Theme = createLightTheme(monitouBrand);
+export const manitouTheme: Theme = createLightTheme(manitouBrand);

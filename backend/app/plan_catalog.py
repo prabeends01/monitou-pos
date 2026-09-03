@@ -142,6 +142,10 @@ FEATURES: list[tuple[str, str, str]] = [
     ("MULTI_LEVEL_APPROVAL", "Multi Level Approval", "admin"),
     ("FULL_AUDIT_LOG", "Full Audit Log", "admin"),
     ("ADVANCED_AUDIT_LOG", "Advanced Audit Log", "admin"),
+    # --- hr ---
+    ("ATTENDANCE_TRACKING", "Attendance Tracking", "hr"),
+    ("LEAVE_MANAGEMENT", "Leave Management", "hr"),
+    ("TA_DA_CLAIMS", "TA/DA Claims", "hr"),
 ]
 
 FEATURE_CODES = {code for code, _name, _module in FEATURES}
@@ -180,6 +184,7 @@ _ENTERPRISE_ADDS = {
     "CYCLE_COUNTING", "QUARANTINE_STOCK", "DEAD_STOCK_ANALYSIS",
     "MULTI_LEVEL_APPROVAL",
     "EXECUTIVE_DASHBOARD", "CUSTOM_REPORTS", "ADVANCED_AUDIT_LOG",
+    "ATTENDANCE_TRACKING", "LEAVE_MANAGEMENT", "TA_DA_CLAIMS",
 }
 
 # plan_code -> set of feature codes enabled by default on that plan.

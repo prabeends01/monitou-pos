@@ -70,7 +70,10 @@ const useSearchStyles = makeStyles({
  * store value so backspacing to empty (to retype a number) doesn't get
  * immediately snapped back to 1 by the store's min-1 clamp — the clamp only
  * applies once there's a valid positive number to commit, or on blur if the
- * field was left empty/invalid. */
+ * field was left empty/invalid. Typing 0 (or a negative) is never accepted
+ * as a real quantity — it snaps straight to 1 instead of sitting in the
+ * field showing a qty the line total doesn't match; removing a line is what
+ * the Remove button is for. */
 function QtyInput({ value, onChange }: { value: number; onChange: (qty: number) => void }) {
   const [text, setText] = useState(String(value));
 
@@ -84,11 +87,19 @@ function QtyInput({ value, onChange }: { value: number; onChange: (qty: number) 
       min={1}
       value={text}
       onChange={(_, data) => {
-        setText(data.value);
-        const parsed = Number(data.value);
-        if (data.value !== "" && Number.isFinite(parsed) && parsed > 0) {
-          onChange(parsed);
+        if (data.value === "") {
+          setText("");
+          return;
         }
+        const parsed = Number(data.value);
+        if (!Number.isFinite(parsed)) return;
+        if (parsed <= 0) {
+          setText("1");
+          onChange(1);
+          return;
+        }
+        setText(data.value);
+        onChange(Math.floor(parsed));
       }}
       onBlur={() => {
         const parsed = Number(text);
@@ -306,6 +317,7 @@ export default function PosBilling() {
             <TableHeaderCell>SKU</TableHeaderCell>
             <TableHeaderCell>Name</TableHeaderCell>
             <TableHeaderCell>Qty</TableHeaderCell>
+            <TableHeaderCell>Unit price</TableHeaderCell>
             <TableHeaderCell>Line total</TableHeaderCell>
             <TableHeaderCell></TableHeaderCell>
           </TableRow>
@@ -318,6 +330,7 @@ export default function PosBilling() {
               <TableCell>
                 <QtyInput value={line.qtyBaseUnits} onChange={(qty) => setQty(line.barcodeId, qty)} />
               </TableCell>
+              <TableCell>{Number(line.unitPrice).toFixed(2)}</TableCell>
               <TableCell>{(Number(line.unitPrice) * line.qtyBaseUnits).toFixed(2)}</TableCell>
               <TableCell>
                 <Button size="small" onClick={() => removeLine(line.barcodeId)}>

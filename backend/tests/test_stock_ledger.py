@@ -70,6 +70,30 @@ def test_purchase_receive_rejects_non_positive_qty(client: TestClient, admin_use
     assert resp.status_code == 422
 
 
+def test_current_stock_lists_balance_per_product(client: TestClient, admin_user: User):
+    headers = auth_headers(client, "admin1", "adminpass")
+    product_a = create_product(client, headers, sku="CUR-STK-A")
+    product_b = create_product(client, headers, sku="CUR-STK-B")
+
+    client.post(
+        "/stock/purchases/receive",
+        json={"product_id": product_a["id"], "qty_base_units": 40, "terminal_id": "T1"},
+        headers=headers,
+    )
+    client.post(
+        "/stock/adjustments",
+        json={"product_id": product_b["id"], "qty_base_units": -3, "terminal_id": "T1"},
+        headers=headers,
+    )
+
+    resp = client.get("/stock/current", headers=headers)
+    assert resp.status_code == 200, resp.text
+    rows = {row["product_id"]: row for row in resp.json()}
+    assert rows[product_a["id"]]["balance"] == 40
+    assert rows[product_b["id"]]["balance"] == -3
+    assert rows[product_a["id"]]["sku"] == product_a["sku"]
+
+
 def test_sales_role_cannot_adjust_stock(client: TestClient, admin_user: User, sales_user: User):
     admin_headers = auth_headers(client, "admin1", "adminpass")
     product = create_product(client, admin_headers)

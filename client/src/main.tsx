@@ -5,13 +5,13 @@ import ReactDOM from "react-dom/client";
 
 import App from "./App";
 import "./index.css";
-import { monitouTheme } from "./theme";
+import { manitouTheme } from "./theme";
 
 const queryClient = new QueryClient();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <FluentProvider theme={monitouTheme} style={{ height: "100vh" }}>
+    <FluentProvider theme={manitouTheme} style={{ height: "100vh" }}>
       <QueryClientProvider client={queryClient}>
         <App />
       </QueryClientProvider>
