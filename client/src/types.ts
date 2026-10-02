@@ -178,12 +178,26 @@ export interface Product {
   id: string;
   sku: string;
   name: string;
+  oem_part_number: string | null;
   category: string;
+  subcategory: string | null;
+  brand: string | null;
   compatible_models: string | null;
   base_unit: string;
+  warehouse: string | null;
+  rack: string | null;
+  bin_location: string | null;
+  supplier_name: string | null;
+  supplier_code: string | null;
+  lead_time_days: number | null;
+  min_order_qty: number | null;
   cost_price?: string; // admin only — absent for sales-role responses
   sale_price: string;
+  gst_percent: string;
   reorder_threshold: number;
+  safety_stock: number | null;
+  max_stock: number | null;
+  critical_part: boolean;
   is_active: boolean;
   updated_at: string;
 }
@@ -305,10 +319,29 @@ export interface CurrentStockRow {
   product_id: string;
   sku: string;
   name: string;
+  oem_part_number: string | null;
   category: string;
+  subcategory: string | null;
+  brand: string | null;
   base_unit: string;
-  balance: number;
+  warehouse: string | null;
+  rack: string | null;
+  bin_location: string | null;
+  on_hand_qty: number;
+  reserved_qty: number;
+  available_qty: number;
+  on_order_qty: number;
   reorder_threshold: number;
+  safety_stock: number | null;
+  max_stock: number | null;
+  supplier_name: string | null;
+  supplier_code: string | null;
+  lead_time_days: number | null;
+  min_order_qty: number | null;
+  cost_price: string;
+  sale_price: string;
+  gst_percent: string;
+  critical_part: boolean;
 }
 
 export interface StaffUser {

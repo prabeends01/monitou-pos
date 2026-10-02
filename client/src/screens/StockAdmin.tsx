@@ -30,8 +30,8 @@ import type { CurrentStockRow } from "../types";
 const MOVEMENT_KINDS = ["Purchase receive", "Adjustment"] as const;
 
 function stockStatus(row: CurrentStockRow): { label: string; color: "danger" | "warning" | "success" } {
-  if (row.balance <= 0) return { label: "Out of stock", color: "danger" };
-  if (row.balance <= row.reorder_threshold) return { label: "Low stock", color: "warning" };
+  if (row.on_hand_qty <= 0) return { label: "Out of stock", color: "danger" };
+  if (row.on_hand_qty <= row.reorder_threshold) return { label: "Low stock", color: "warning" };
   return { label: "In stock", color: "success" };
 }
 
@@ -47,11 +47,22 @@ function CurrentStockView() {
   const rows = stockQuery.data ?? [];
   const filtered = useMemo(
     () =>
-      rows.filter((r) => `${r.sku} ${r.name} ${r.category}`.toLowerCase().includes(search.toLowerCase())),
+      rows.filter(
+        (r) =>
+          `${r.sku} ${r.name} ${r.category} ${r.oem_part_number || ""}`.toLowerCase().includes(search.toLowerCase()),
+      ),
     [rows, search],
   );
-  const outOfStock = rows.filter((r) => r.balance <= 0).length;
-  const lowStock = rows.filter((r) => r.balance > 0 && r.balance <= r.reorder_threshold).length;
+  const outOfStock = rows.filter((r) => r.on_hand_qty <= 0).length;
+  const lowStock = rows.filter((r) => r.on_hand_qty > 0 && r.on_hand_qty <= r.reorder_threshold).length;
+
+  async function handleDownload() {
+    try {
+      await api.downloadStockCSV();
+    } catch (err) {
+      console.error("CSV download failed", err);
+    }
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -59,6 +70,11 @@ function CurrentStockView() {
         <Button appearance="primary" onClick={() => stockQuery.refetch()} disabled={stockQuery.isFetching}>
           {stockQuery.isFetching ? <Spinner size="tiny" /> : "Generate current stock"}
         </Button>
+        {rows.length > 0 && (
+          <Button onClick={handleDownload} disabled={stockQuery.isFetching}>
+            Download CSV
+          </Button>
+        )}
         {rows.length > 0 && (
           <Field label="Search" style={{ minWidth: 220 }}>
             <Input
@@ -102,33 +118,46 @@ function CurrentStockView() {
             borderRadius: 8,
           }}
         >
-          <Table size="small" style={{ minWidth: 640 }}>
+          <Table size="small" style={{ minWidth: 1100 }}>
             <TableHeader
               style={{ position: "sticky", top: 0, background: "var(--colorNeutralBackground1)", zIndex: 1 }}
             >
               <TableRow>
                 <TableHeaderCell>SKU</TableHeaderCell>
                 <TableHeaderCell>Name</TableHeaderCell>
+                <TableHeaderCell>OEM Part #</TableHeaderCell>
                 <TableHeaderCell>Category</TableHeaderCell>
-                <TableHeaderCell>Unit</TableHeaderCell>
-                <TableHeaderCell>Reorder at</TableHeaderCell>
-                <TableHeaderCell>Balance</TableHeaderCell>
+                <TableHeaderCell>Brand</TableHeaderCell>
+                <TableHeaderCell>Location</TableHeaderCell>
+                <TableHeaderCell>On Hand</TableHeaderCell>
+                <TableHeaderCell>Reserved</TableHeaderCell>
+                <TableHeaderCell>Available</TableHeaderCell>
+                <TableHeaderCell>On Order</TableHeaderCell>
+                <TableHeaderCell>Reorder At</TableHeaderCell>
+                <TableHeaderCell>Supplier</TableHeaderCell>
                 <TableHeaderCell>Status</TableHeaderCell>
               </TableRow>
             </TableHeader>
             <TableBody>
               {filtered.map((row) => {
                 const status = stockStatus(row);
+                const location = [row.warehouse, row.rack, row.bin_location].filter(Boolean).join("/") || "-";
                 return (
                   <TableRow key={row.product_id}>
                     <TableCell>{row.sku}</TableCell>
                     <TableCell>{row.name}</TableCell>
+                    <TableCell>{row.oem_part_number || "-"}</TableCell>
                     <TableCell>{row.category}</TableCell>
-                    <TableCell>{row.base_unit}</TableCell>
-                    <TableCell>{row.reorder_threshold}</TableCell>
+                    <TableCell>{row.brand || "-"}</TableCell>
+                    <TableCell>{location}</TableCell>
                     <TableCell>
-                      <Body1Strong>{row.balance}</Body1Strong>
+                      <Body1Strong>{row.on_hand_qty}</Body1Strong>
                     </TableCell>
+                    <TableCell>{row.reserved_qty}</TableCell>
+                    <TableCell>{row.available_qty}</TableCell>
+                    <TableCell>{row.on_order_qty}</TableCell>
+                    <TableCell>{row.reorder_threshold}</TableCell>
+                    <TableCell>{row.supplier_name || "-"}</TableCell>
                     <TableCell>
                       <Badge appearance="tint" color={status.color}>
                         {status.label}
