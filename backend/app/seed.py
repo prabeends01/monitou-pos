@@ -7,7 +7,7 @@ Run: uv run python -m app.seed
 
 import random
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import text
@@ -15,7 +15,16 @@ from sqlmodel import Session, select
 
 from app.auth.security import hash_password
 from app.db import engine
-from app.models import Barcode, Customer, Plan, Product, Supplier, Tenant, User, UserRole
+from app.models import (
+    Barcode,
+    Customer,
+    Plan,
+    Product,
+    Supplier,
+    Tenant,
+    User,
+    UserRole,
+)
 from app.models.stock_movement import MovementType
 from app.schemas.sale import SaleCreate, SaleItemCreate
 from app.services.sales import create_sale
@@ -31,32 +40,131 @@ INVOICE_SERIES = "SEED"  # distinct from any real terminal (T1, T2, ...) so a cl
 TENANT_CODE = "MONITOU-001"  # same tenant_code the tenant_id backfill migration assigned
 # existing (pre-tenancy) data to — see alembic/versions/4c4b99b6eb8b
 
-# (sku, name, category, compatible_models, cost, sale, reorder_threshold, initial_qty, box_pack_qty|None)
+# (sku, name, oem_part_number, category, subcategory, brand, compatible_models,
+#  warehouse, rack, bin_location, supplier_name, supplier_code, lead_time_days,
+#  min_order_qty, cost, sale, gst_percent, reorder_threshold, safety_stock,
+#  max_stock, critical_part, initial_qty, box_pack_qty|None)
 PRODUCTS = [
-    ("FST-M10-BOLT", "M10 Hex Bolt", "fasteners", "MX-200,MX-300", "3.50", "5.00", 200, 1500, 100),
-    ("FST-M12-NUT", "M12 Hex Nut", "fasteners", "MX-200,MX-300,MX-400", "1.20", "2.00", 300, 2000, 100),
-    ("FST-WASH-10", "Flat Washer 10mm", "fasteners", "MX-200,MX-300", "0.40", "0.80", 500, 3000, 100),
-    ("HYD-FLT-100", "Hydraulic Return Filter", "hydraulics", "MX-300", "450.00", "650.00", 5, 40, None),
-    ("HYD-FLT-OIL", "Hydraulic Oil Filter Cartridge", "hydraulics", "MX-200,MX-300", "320.00", "480.00", 8, 30, None),
-    ("HYD-HOSE-12", "Hydraulic Hose 1/2in (per m)", "hydraulics", "MX-300,MX-400", "180.00", "270.00", 20, 100, None),
-    ("FLT-AIR-01", "Air Filter Element", "filters", "MX-200,MX-300,MX-400", "560.00", "820.00", 6, 25, None),
-    ("FLT-FUEL-01", "Fuel Filter", "filters", "MX-300,MX-400", "210.00", "320.00", 10, 45, None),
-    ("FLT-CABIN-01", "Cabin Air Filter", "filters", "MX-400", "150.00", "230.00", 8, 20, None),
-    ("ELE-ALT-90A", "Alternator 90A", "electrical", "MX-300,MX-400", "4200.00", "5800.00", 3, 3, None),
-    ("ELE-STARTER-01", "Starter Motor", "electrical", "MX-200,MX-300", "5100.00", "6900.00", 3, 4, None),
-    ("ELE-HEADLIGHT-LED", "Headlight Assembly LED", "electrical", "MX-400", "1350.00", "1950.00", 6, 18, None),
-    ("UND-ROLLER-01", "Track Roller", "undercarriage", "MX-400", "2200.00", "3100.00", 4, 12, None),
-    ("UND-CHAIN-LINK", "Track Chain Link", "undercarriage", "MX-400", "340.00", "500.00", 15, 60, None),
-    ("ENG-SEAL-KIT", "Engine Oil Seal Kit", "engine", "MX-200,MX-300,MX-400", "780.00", "1150.00", 6, 20, None),
-    ("ENG-PISTON-RING", "Piston Ring Set", "engine", "MX-300", "1650.00", "2400.00", 4, 10, None),
-    ("ATT-FORK-1200", "Forklift Fork 1200mm", "attachments", "MX-200", "3800.00", "5400.00", 4, 10, None),
-    ("TIRE-28X9-15", "Solid Tire 28x9-15", "tires", "MX-200", "6200.00", "8600.00", 3, 8, None),
+    dict(sku="FST-M10-BOLT", name="M10 Hex Bolt", oem_part_number="STD-M10-BOLT", category="fasteners",
+         subcategory="Bolt", brand="Generic", compatible_models="MX-200,MX-300",
+         warehouse="WH-01", rack="F-01", bin_location="B-01", supplier_name="Bharat Fasteners Co",
+         supplier_code="SUP-002", lead_time_days=3, min_order_qty=100, cost="3.50", sale="5.00",
+         gst_percent=Decimal(18), reorder_threshold=200, safety_stock=100, max_stock=2000,
+         critical_part=False, initial_qty=1500, box_pack_qty=100),
+    dict(sku="FST-M12-NUT", name="M12 Hex Nut", oem_part_number="STD-M12-NUT", category="fasteners",
+         subcategory="Nut", brand="Generic", compatible_models="MX-200,MX-300,MX-400",
+         warehouse="WH-01", rack="F-01", bin_location="B-02", supplier_name="Bharat Fasteners Co",
+         supplier_code="SUP-002", lead_time_days=3, min_order_qty=100, cost="1.20", sale="2.00",
+         gst_percent=Decimal(18), reorder_threshold=300, safety_stock=150, max_stock=3000,
+         critical_part=False, initial_qty=2000, box_pack_qty=100),
+    dict(sku="FST-WASH-10", name="Flat Washer 10mm", oem_part_number="STD-M10-WASH", category="fasteners",
+         subcategory="Washer", brand="Generic", compatible_models="MX-200,MX-300",
+         warehouse="WH-01", rack="F-01", bin_location="B-10", supplier_name="Bharat Fasteners Co",
+         supplier_code="SUP-002", lead_time_days=3, min_order_qty=100, cost="0.40", sale="0.80",
+         gst_percent=Decimal(18), reorder_threshold=500, safety_stock=200, max_stock=5000,
+         critical_part=False, initial_qty=3000, box_pack_qty=100),
+    dict(sku="HYD-FLT-100", name="Hydraulic Return Filter", oem_part_number="MAN-HRF-001", category="hydraulics",
+         subcategory="Hydraulic Filter", brand="Manitou", compatible_models="MX-300",
+         warehouse="WH-01", rack="H-01", bin_location="B-01", supplier_name="Apex Hydraulics Pvt Ltd",
+         supplier_code="SUP-001", lead_time_days=7, min_order_qty=1, cost="450.00", sale="650.00",
+         gst_percent=Decimal(18), reorder_threshold=5, safety_stock=3, max_stock=50,
+         critical_part=False, initial_qty=40, box_pack_qty=None),
+    dict(sku="HYD-FLT-OIL", name="Hydraulic Oil Filter Cartridge", oem_part_number="MAN-HOF-001",
+         category="hydraulics", subcategory="Hydraulic Filter", brand="Manitou",
+         compatible_models="MX-200,MX-300", warehouse="WH-01", rack="H-02", bin_location="B-01",
+         supplier_name="Apex Hydraulics Pvt Ltd", supplier_code="SUP-001", lead_time_days=7,
+         min_order_qty=1, cost="320.00", sale="480.00", gst_percent=Decimal(18),
+         reorder_threshold=8, safety_stock=4, max_stock=50, critical_part=True, initial_qty=30,
+         box_pack_qty=None),
+    dict(sku="HYD-HOSE-12", name="Hydraulic Hose 1/2in (per m)", oem_part_number="HYD-12-001",
+         category="hydraulics", subcategory="Hydraulic Hose", brand="Generic",
+         compatible_models="MX-300,MX-400", warehouse="WH-01", rack="H-01", bin_location="R-01",
+         supplier_name="Apex Hydraulics Pvt Ltd", supplier_code="SUP-001", lead_time_days=5,
+         min_order_qty=10, cost="180.00", sale="270.00", gst_percent=Decimal(18),
+         reorder_threshold=20, safety_stock=10, max_stock=200, critical_part=True, initial_qty=100,
+         box_pack_qty=None),
+    dict(sku="FLT-AIR-01", name="Air Filter Element", oem_part_number="Manitou 563416", category="filters",
+         subcategory="Air Filter", brand="Manitou", compatible_models="MX-200,MX-300,MX-400",
+         warehouse="WH-01", rack="A-01", bin_location="B-01", supplier_name="Apex Hydraulics Pvt Ltd",
+         supplier_code="SUP-001", lead_time_days=7, min_order_qty=1, cost="560.00", sale="820.00",
+         gst_percent=Decimal(18), reorder_threshold=6, safety_stock=3, max_stock=40,
+         critical_part=False, initial_qty=25, box_pack_qty=None),
+    dict(sku="FLT-FUEL-01", name="Fuel Filter", oem_part_number="Manitou 706498", category="filters",
+         subcategory="Fuel Filter", brand="Manitou", compatible_models="MX-300,MX-400",
+         warehouse="WH-01", rack="A-03", bin_location="B-02", supplier_name="Apex Hydraulics Pvt Ltd",
+         supplier_code="SUP-001", lead_time_days=7, min_order_qty=1, cost="210.00", sale="320.00",
+         gst_percent=Decimal(18), reorder_threshold=10, safety_stock=5, max_stock=60,
+         critical_part=True, initial_qty=45, box_pack_qty=None),
+    dict(sku="FLT-CABIN-01", name="Cabin Air Filter", oem_part_number="Manitou 525523", category="filters",
+         subcategory="Cabin Filter", brand="Manitou", compatible_models="MX-400",
+         warehouse="WH-01", rack="A-02", bin_location="B-01", supplier_name="Apex Hydraulics Pvt Ltd",
+         supplier_code="SUP-001", lead_time_days=7, min_order_qty=1, cost="150.00", sale="230.00",
+         gst_percent=Decimal(18), reorder_threshold=8, safety_stock=4, max_stock=30,
+         critical_part=False, initial_qty=20, box_pack_qty=None),
+    dict(sku="ELE-ALT-90A", name="Alternator 90A", oem_part_number="Manitou 746120", category="electrical",
+         subcategory="Alternator", brand="Manitou", compatible_models="MX-300,MX-400",
+         warehouse="WH-01", rack="E-02", bin_location="B-03", supplier_name="ABC Auto Electricals",
+         supplier_code="SUP-003", lead_time_days=10, min_order_qty=1, cost="4200.00", sale="5800.00",
+         gst_percent=Decimal(18), reorder_threshold=3, safety_stock=2, max_stock=10,
+         critical_part=True, initial_qty=3, box_pack_qty=None),
+    dict(sku="ELE-STARTER-01", name="Starter Motor", oem_part_number="MAN-START-001", category="electrical",
+         subcategory="Starter Motor", brand="Manitou", compatible_models="MX-200,MX-300",
+         warehouse="WH-01", rack="E-04", bin_location="B-02", supplier_name="ABC Auto Electricals",
+         supplier_code="SUP-003", lead_time_days=10, min_order_qty=1, cost="5100.00", sale="6900.00",
+         gst_percent=Decimal(18), reorder_threshold=3, safety_stock=2, max_stock=10,
+         critical_part=True, initial_qty=4, box_pack_qty=None),
+    dict(sku="ELE-HEADLIGHT-LED", name="Headlight Assembly LED", oem_part_number="MAN-HL-LED-01",
+         category="electrical", subcategory="Lighting", brand="Manitou", compatible_models="MX-400",
+         warehouse="WH-01", rack="E-03", bin_location="B-01", supplier_name="ABC Auto Electricals",
+         supplier_code="SUP-003", lead_time_days=10, min_order_qty=1, cost="1350.00", sale="1950.00",
+         gst_percent=Decimal(18), reorder_threshold=6, safety_stock=3, max_stock=25,
+         critical_part=False, initial_qty=18, box_pack_qty=None),
+    dict(sku="UND-ROLLER-01", name="Track Roller", oem_part_number="MAN-TRK-ROLL-01", category="undercarriage",
+         subcategory="Track Roller", brand="Manitou", compatible_models="MX-400",
+         warehouse="WH-01", rack="U-01", bin_location="B-01", supplier_name="SteelTrack Undercarriage Supplies",
+         supplier_code="SUP-004", lead_time_days=14, min_order_qty=1, cost="2200.00", sale="3100.00",
+         gst_percent=Decimal(18), reorder_threshold=4, safety_stock=2, max_stock=20,
+         critical_part=True, initial_qty=12, box_pack_qty=None),
+    dict(sku="UND-CHAIN-LINK", name="Track Chain Link", oem_part_number="MAN-TRK-CHAIN-01",
+         category="undercarriage", subcategory="Track Chain", brand="Manitou", compatible_models="MX-400",
+         warehouse="WH-01", rack="U-01", bin_location="B-02", supplier_name="SteelTrack Undercarriage Supplies",
+         supplier_code="SUP-004", lead_time_days=14, min_order_qty=10, cost="340.00", sale="500.00",
+         gst_percent=Decimal(18), reorder_threshold=15, safety_stock=8, max_stock=100,
+         critical_part=True, initial_qty=60, box_pack_qty=None),
+    dict(sku="ENG-SEAL-KIT", name="Engine Oil Seal Kit", oem_part_number="MAN-OSK-001", category="engine",
+         subcategory="Seal Kit", brand="OEM", compatible_models="MX-200,MX-300,MX-400",
+         warehouse="WH-01", rack="C-01", bin_location="B-02", supplier_name="Industrial Engine Spares",
+         supplier_code="SUP-005", lead_time_days=12, min_order_qty=1, cost="780.00", sale="1150.00",
+         gst_percent=Decimal(18), reorder_threshold=6, safety_stock=3, max_stock=30,
+         critical_part=True, initial_qty=20, box_pack_qty=None),
+    dict(sku="ENG-PISTON-RING", name="Piston Ring Set", oem_part_number="MAN-PR-001", category="engine",
+         subcategory="Piston Ring", brand="OEM", compatible_models="MX-300",
+         warehouse="WH-01", rack="C-02", bin_location="B-01", supplier_name="Industrial Engine Spares",
+         supplier_code="SUP-005", lead_time_days=12, min_order_qty=1, cost="1650.00", sale="2400.00",
+         gst_percent=Decimal(18), reorder_threshold=4, safety_stock=2, max_stock=20,
+         critical_part=True, initial_qty=10, box_pack_qty=None),
+    dict(sku="ATT-FORK-1200", name="Forklift Fork 1200mm", oem_part_number="MAN-FORK-1200",
+         category="attachments", subcategory="Fork", brand="Manitou", compatible_models="MX-200",
+         warehouse="WH-01", rack="YARD-01", bin_location="F-01", supplier_name="Manitou Attachments",
+         supplier_code="SUP-006", lead_time_days=21, min_order_qty=1, cost="3800.00", sale="5400.00",
+         gst_percent=Decimal(18), reorder_threshold=4, safety_stock=2, max_stock=15,
+         critical_part=True, initial_qty=10, box_pack_qty=None),
+    dict(sku="TIRE-28X9-15", name="Solid Tire 28x9-15", oem_part_number="TYRE-28X9-15", category="tires",
+         subcategory="Solid Tire", brand="OEM", compatible_models="MX-200",
+         warehouse="WH-01", rack="TYRE-01", bin_location="T-02", supplier_name="Industrial Tyres India",
+         supplier_code="SUP-007", lead_time_days=14, min_order_qty=1, cost="6200.00", sale="8600.00",
+         gst_percent=Decimal(18), reorder_threshold=3, safety_stock=2, max_stock=15,
+         critical_part=True, initial_qty=8, box_pack_qty=None),
 ]
 
 SUPPLIERS = [
     ("Apex Hydraulics Pvt Ltd", "9876500011", "sales@apexhydraulics.example", "27AAAPA1111A1Z5"),
     ("Bharat Fasteners Co", "9876500022", "orders@bharatfasteners.example", "27AAAPB2222B1Z5"),
     ("SteelTrack Undercarriage Supplies", "9876500033", "info@steeltrack.example", "27AAAPS3333C1Z5"),
+    ("ABC Auto Electricals", "9876500044", "sales@abcauto.example", "27AAABC4444F1Z5"),
+    ("Industrial Engine Spares", "9876500055", "orders@indengspares.example", "27AAAIES5555G1Z5"),
+    ("Manitou Attachments", "9876500066", "sales@manitouatt.example", "27AAAMAN6666H1Z5"),
+    ("Industrial Tyres India", "9876500077", "sales@indtyres.example", "27AAAITI7777I1Z5"),
 ]
 
 CUSTOMERS = [
@@ -134,17 +242,31 @@ def seed() -> None:
 
         products: list[Product] = []
         barcodes_by_product: dict[str, list[Barcode]] = {}
-        for i, (sku, name, category, models, cost, sale, threshold, qty, box_pack) in enumerate(PRODUCTS):
+        for i, p in enumerate(PRODUCTS):
             product = Product(
                 tenant_id=tenant.id,
-                sku=sku,
-                name=name,
-                category=category,
-                compatible_models=models,
+                sku=p["sku"],
+                name=p["name"],
+                oem_part_number=p["oem_part_number"],
+                category=p["category"],
+                subcategory=p["subcategory"],
+                brand=p["brand"],
+                compatible_models=p["compatible_models"],
                 base_unit="piece",
-                cost_price=Decimal(cost),
-                sale_price=Decimal(sale),
-                reorder_threshold=threshold,
+                warehouse=p["warehouse"],
+                rack=p["rack"],
+                bin_location=p["bin_location"],
+                supplier_name=p["supplier_name"],
+                supplier_code=p["supplier_code"],
+                lead_time_days=p["lead_time_days"],
+                min_order_qty=p["min_order_qty"],
+                cost_price=Decimal(p["cost"]),
+                sale_price=Decimal(p["sale"]),
+                gst_percent=p["gst_percent"],
+                reorder_threshold=p["reorder_threshold"],
+                safety_stock=p["safety_stock"],
+                max_stock=p["max_stock"],
+                critical_part=p["critical_part"],
             )
             session.add(product)
             session.commit()
@@ -159,27 +281,26 @@ def seed() -> None:
                 label="Single piece",
             )
             session.add(single)
-            barcodes_by_product[sku] = [single]
-            if box_pack:
+            barcodes_by_product[p["sku"]] = [single]
+            if p["box_pack_qty"]:
                 box = Barcode(
                     tenant_id=tenant.id,
                     product_id=product.id,
                     barcode_value=f"89000000{i:04d}2",
-                    pack_qty=box_pack,
-                    label=f"Box of {box_pack}",
+                    pack_qty=p["box_pack_qty"],
+                    label=f"Box of {p['box_pack_qty']}",
                 )
                 session.add(box)
-                barcodes_by_product[sku].append(box)
+                barcodes_by_product[p["sku"]].append(box)
         session.commit()
 
         # initial stock via the ledger service, not raw inserts, so balances
         # stay consistent with everything else in the system
-        now = datetime.now(timezone.utc)
-        for product, row in zip(products, PRODUCTS):
-            sku, _name, _cat, _models, _cost, _sale, threshold, qty, _box = row
+        now = datetime.now(UTC)
+        for product, p in zip(products, PRODUCTS):
             # a few products intentionally received below their reorder
             # threshold, so low-stock reporting has something to show
-            receive_qty = max(0, threshold - 2) if sku in LOW_STOCK_OVERRIDES else qty
+            receive_qty = max(0, p["reorder_threshold"] - 2) if p["sku"] in LOW_STOCK_OVERRIDES else p["initial_qty"]
             record_movement(
                 session,
                 id=uuid.uuid4(),
@@ -214,7 +335,7 @@ def seed() -> None:
                     terminal_id=TERMINAL_ID,
                     customer_id=None,
                     payment_mode=random.choice(PAYMENT_MODES),
-                    gst_amount=Decimal("0"),
+                    gst_amount=Decimal(0),
                     created_at_client=sale_time,
                     items=[
                         SaleItemCreate(

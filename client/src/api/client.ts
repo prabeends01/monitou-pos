@@ -210,6 +210,19 @@ export class ApiClient {
     return this.requestJson("/stock/current");
   }
 
+  async downloadStockCSV(): Promise<void> {
+    const resp = await this.request("/stock/current/export");
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "current_stock.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   getUsers(): Promise<StaffUser[]> {
     return this.requestJson("/users");
   }

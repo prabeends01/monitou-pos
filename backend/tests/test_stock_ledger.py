@@ -89,8 +89,8 @@ def test_current_stock_lists_balance_per_product(client: TestClient, admin_user:
     resp = client.get("/stock/current", headers=headers)
     assert resp.status_code == 200, resp.text
     rows = {row["product_id"]: row for row in resp.json()}
-    assert rows[product_a["id"]]["balance"] == 40
-    assert rows[product_b["id"]]["balance"] == -3
+    assert rows[product_a["id"]]["on_hand_qty"] == 40
+    assert rows[product_b["id"]]["on_hand_qty"] == -3
     assert rows[product_a["id"]]["sku"] == product_a["sku"]
 
 
